@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gem 養豬專家 | 永隆牧場 雲端數位中心</title>
+    <title>Gem 養豬專家 | 永隆牧場 2025 雲端發佈中心</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
@@ -27,32 +27,28 @@
         };
         // ==========================================
 
-        // 設定區
         const SPREADSHEET_ID = '1Q_xd4aNarphGl_7REybhYsp4mRNvCbWXeqDgts89w2k';
         const MASTER_PASSCODE = "YL2025"; 
         
-        // 全域變數
         window.firebaseModules = { doc, setDoc, getDoc, collection, onSnapshot };
         window.appId = "yong-long-pig-expert";
         window.wbsData = [];
         window.unsubscribe = null;
+        window.currentSearch = '';
 
-        // 通行碼檢查
         window.checkPasscode = function() {
-            const input = document.getElementById('passcode-input').value;
+            const input = document.getElementById('passcode-input')?.value;
             if (input === MASTER_PASSCODE) {
                 sessionStorage.setItem('is_authenticated', 'true');
-                document.getElementById('auth-overlay').classList.add('hidden');
+                document.getElementById('auth-overlay')?.classList.add('hidden');
                 initFirebase();
             } else {
-                document.getElementById('passcode-error').classList.remove('hidden');
-                document.getElementById('passcode-input').value = "";
+                document.getElementById('passcode-error')?.classList.remove('hidden');
             }
         };
 
         async function initFirebase() {
             if (!myFirebaseConfig.apiKey || myFirebaseConfig.apiKey.includes("在此填入")) return;
-
             try {
                 const app = initializeApp(myFirebaseConfig);
                 const auth = getAuth(app);
@@ -61,41 +57,17 @@
                 onAuthStateChanged(auth, (user) => {
                     window.currentUser = user;
                     if (user) {
-                        if (document.getElementById('user-display')) document.getElementById('user-display').innerText = user.uid;
-                        // 確保環境就緒後載入資料
-                        const retryLoad = setInterval(() => {
-                            if (typeof window.loadCloudData === 'function') {
-                                window.loadCloudData();
-                                clearInterval(retryLoad);
-                            }
-                        }, 200);
+                        const userDisplay = document.getElementById('user-display');
+                        if (userDisplay) userDisplay.innerText = user.uid;
+                        loadCloudData();
                     }
                 });
-
                 await signInAnonymously(auth);
-
             } catch (error) {
-                console.error("Firebase Error:", error);
-                handleFirebaseError(error);
+                console.error("Firebase Auth Error:", error);
             }
         }
 
-        function handleFirebaseError(error) {
-            const statusText = document.getElementById('sync-status-text');
-            const dot = document.getElementById('sync-status-dot');
-            if (dot) dot.className = "w-2 h-2 bg-rose-500 rounded-full";
-            
-            let msg = "連線失敗";
-            if (error.code === 'auth/admin-restricted-operation') {
-                msg = "請在控制台啟動『匿名登入』";
-            } else if (error.code === 'auth/unauthorized-domain') {
-                msg = "網域未授權，請至 Firebase 設定";
-            }
-            if (statusText) statusText.innerText = msg;
-            showToast(msg, "error");
-        }
-
-        // 核心同步邏輯
         window.loadCloudData = function() {
             if (!window.db) return;
             const { doc, onSnapshot } = window.firebaseModules;
@@ -106,25 +78,34 @@
                 if (docSnap.exists()) {
                     window.wbsData = docSnap.data().modules;
                     updateUI("雲端即時連線中");
-                    if (!document.getElementById('sop-modal').classList.contains('hidden') && !window.currentModalState.isEditing) {
-                        renderSteps();
+                    
+                    const sopModal = document.getElementById('sop-modal');
+                    if (sopModal && !sopModal.classList.contains('hidden')) {
+                        const mIdx = window.currentMIdx;
+                        const tIdx = window.currentTIdx;
+                        if (mIdx !== undefined && tIdx !== undefined) renderSteps(mIdx, tIdx);
                     }
                 } else {
-                    window.syncFromGSheets();
+                    showConfirmModal("雲端尚未初始化，是否立即同步試算表？", window.syncFromGSheets);
                 }
             }, (error) => {
-                console.error("Firestore Read Error:", error);
-                if (error.code === 'permission-denied') {
-                    showToast("資料庫權限不足，請檢查 Firestore Rules 設定", "error");
-                    updateStatus("資料庫權限錯誤", "rose");
-                }
+                console.error("Read Error:", error);
+                if (error.code === 'permission-denied') showToast("讀取權限不足", "error");
             });
         };
 
+        window.requestGSheetSync = function() {
+            showConfirmModal(
+                "⚠️ 確定要執行同步嗎？\n這將會根據 Google 試算表的最新內容更新全牧場裝置的看板資訊。",
+                window.syncFromGSheets
+            );
+        };
+
         window.syncFromGSheets = async function() {
+            closeConfirmModal();
             const syncIcon = document.getElementById('gsync-icon');
             if (syncIcon) syncIcon.classList.add('animate-spin');
-            updateStatus("正在從試算表抓取資料...", "yellow");
+            updateStatus("正在抓取試算表...", "yellow");
 
             try {
                 const moduleDefinitions = [
@@ -147,167 +128,28 @@
 
                 window.wbsData = results;
                 await saveToCloud();
-                showToast("成功從試算表更新雲端庫", "success");
+                showToast("同步成功：已更新雲端數據庫", "success");
             } catch (error) {
-                console.error("GSheets Sync Error:", error);
-                showToast("試算表讀取失敗，請確認連結是否公開", "error");
+                showToast("同步失敗，請檢查網路或連結權限", "error");
             } finally {
                 if (syncIcon) syncIcon.classList.remove('animate-spin');
             }
         };
 
-        window.onload = () => {
-            if (sessionStorage.getItem('is_authenticated') === 'true') {
-                document.getElementById('auth-overlay').classList.add('hidden');
-                initFirebase();
-            }
-            lucide.createIcons();
-            document.getElementById('passcode-input')?.addEventListener('keypress', (e) => { if (e.key === 'Enter') window.checkPasscode(); });
-        };
-    </script>
-
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700;900&display=swap');
-        body { font-family: 'Noto Sans TC', sans-serif; background-color: #f8fafc; color: #1e293b; }
-        .glass-nav { background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(20px); border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
-        .gem-card { transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); background: white; border: 1px solid #f1f5f9; }
-        .gem-card:hover { transform: translateY(-8px); box-shadow: 0 25px 50px -12px rgba(99, 102, 241, 0.12); border-color: #e2e8f0; }
-        .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-    </style>
-</head>
-<body class="flex flex-col min-h-screen">
-
-    <div id="auth-overlay" class="fixed inset-0 z-[1000] bg-slate-900 flex items-center justify-center p-6">
-        <div class="max-w-md w-full bg-white rounded-[40px] p-10 shadow-2xl text-center">
-            <div class="inline-flex p-5 rounded-3xl bg-indigo-50 text-indigo-600 mb-6"><i data-lucide="shield-check" class="w-10 h-10"></i></div>
-            <h2 class="text-2xl font-black text-slate-900 mb-2">永隆牧場數位中心</h2>
-            <p class="text-slate-400 text-sm mb-8">請輸入通行碼以啟動雲端同步</p>
-            <input type="password" id="passcode-input" placeholder="請輸入通行碼" class="w-full px-6 py-4 bg-slate-100 rounded-2xl text-center text-xl font-bold mb-4 outline-none focus:ring-4 ring-indigo-500/20">
-            <p id="passcode-error" class="hidden text-rose-500 text-xs font-bold mb-4">通行碼錯誤</p>
-            <button onclick="window.checkPasscode()" class="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black text-lg hover:bg-indigo-700 transition-all">啟動系統</button>
-        </div>
-    </div>
-
-    <header class="glass-nav sticky top-0 z-[100] px-6 py-4 shadow-sm">
-        <div class="max-w-[1500px] mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
-            <div class="flex items-center gap-4">
-                <div class="bg-indigo-600 p-3 rounded-2xl text-white shadow-lg"><i data-lucide="layout-dashboard" class="w-7 h-7"></i></div>
-                <div>
-                    <h1 class="text-2xl font-black text-slate-900 tracking-tighter">Gem 養豬專家</h1>
-                    <div class="flex items-center gap-2">
-                        <span id="sync-status-dot" class="w-2 h-2 bg-slate-300 rounded-full"></span>
-                        <p id="sync-status-text" class="text-[11px] text-slate-400 font-bold uppercase tracking-widest">載入中</p>
-                    </div>
-                </div>
-            </div>
-            <div class="flex-1 max-w-xl w-full">
-                <div class="relative">
-                    <i data-lucide="search" class="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400"></i>
-                    <input type="text" id="searchInput" oninput="window.handleSearch()" placeholder="快速搜尋關鍵字..." class="w-full pl-12 pr-4 py-3 bg-slate-100/80 rounded-2xl outline-none focus:bg-white transition-all">
-                </div>
-            </div>
-            <div class="flex items-center gap-3">
-                <button onclick="window.syncFromGSheets()" class="flex items-center gap-2 px-5 py-3 rounded-2xl bg-white border border-slate-200 text-slate-600 font-bold text-sm hover:bg-slate-50 transition-all">
-                    <i data-lucide="refresh-cw" id="gsync-icon" class="w-4 h-4"></i>
-                    <span>試算表匯入</span>
-                </button>
-            </div>
-        </div>
-    </header>
-
-    <main class="flex-1 max-w-[1500px] w-full mx-auto px-6 py-8">
-        <section class="grid grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
-            <div class="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm">
-                <p class="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3">當前 UID</p>
-                <p id="user-display" class="text-xs font-mono text-slate-400 truncate">Waiting...</p>
-            </div>
-            <div class="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm">
-                <p class="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3">SOP 總量</p>
-                <h2 id="stats-sop-count" class="text-4xl font-black text-slate-900">--</h2>
-            </div>
-            <div class="bg-indigo-600 p-6 rounded-[32px] shadow-xl text-white relative overflow-hidden">
-                <p class="text-indigo-200 text-[11px] font-black uppercase tracking-widest mb-3">同步狀態</p>
-                <div class="flex items-center gap-3"><i data-lucide="zap" class="w-6 h-6"></i><h2 class="text-xl font-bold italic">Real-time</h2></div>
-            </div>
-            <div class="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm">
-                <p class="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3">最後異動</p>
-                <h2 id="last-sync-time" class="text-2xl font-bold">--:--:--</h2>
-            </div>
-        </section>
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8" id="main-grid">
-            <div class="col-span-full py-20 text-center text-slate-400">
-                <div class="animate-spin inline-block mb-4"><i data-lucide="loader-2" class="w-10 h-10"></i></div>
-                <p>正在同步雲端主資料庫...</p>
-            </div>
-        </div>
-    </main>
-
-    <!-- SOP Modal -->
-    <div id="sop-modal" class="fixed inset-0 z-[200] flex items-center justify-center p-4 md:p-8 hidden">
-        <div class="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onclick="window.closeSOP()"></div>
-        <div class="relative bg-white w-full max-w-4xl rounded-[40px] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div class="p-8 border-b border-slate-100 flex justify-between items-start bg-slate-50/50">
-                <div class="flex items-center gap-6">
-                    <div id="modal-icon-container" class="w-16 h-16 rounded-[24px] flex items-center justify-center">
-                        <i id="modal-icon" data-lucide="book-open" class="w-8 h-8"></i>
-                    </div>
-                    <div>
-                        <div class="flex items-center gap-2 mb-1.5">
-                            <span id="modal-tag" class="text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest"></span>
-                            <span id="edit-indicator" class="hidden text-[10px] font-black text-amber-600 bg-amber-50 px-2 py-0.5 rounded italic animate-pulse">編輯模式</span>
-                        </div>
-                        <h3 id="modal-title" class="text-3xl font-black text-slate-900 tracking-tight leading-tight"></h3>
-                    </div>
-                </div>
-                <div class="flex gap-2">
-                    <button id="edit-toggle-btn" onclick="window.toggleEditMode()" class="p-3 bg-white border border-slate-200 text-slate-600 rounded-2xl hover:bg-slate-50 transition-all shadow-sm">
-                        <i data-lucide="edit-3" class="w-6 h-6"></i>
-                    </button>
-                    <button onclick="window.closeSOP()" class="p-3 text-slate-400 hover:text-rose-500"><i data-lucide="x" class="w-6 h-6"></i></button>
-                </div>
-            </div>
-            <div class="p-8 md:p-12 overflow-y-auto bg-white flex-1" id="sop-steps-container"></div>
-            <div class="p-6 bg-slate-50/80 border-t border-slate-100 flex items-center justify-between">
-                <p class="text-[11px] text-slate-400 font-medium italic">※ 修改將自動同步至所有裝置</p>
-                <div class="flex gap-3">
-                    <button onclick="window.closeSOP()" class="px-8 py-4 bg-white border border-slate-200 text-slate-600 rounded-2xl font-bold">關閉</button>
-                    <button id="save-btn" onclick="window.saveSOPChanges()" class="hidden px-10 py-4 bg-indigo-600 text-white rounded-2xl font-black shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all">儲存修改</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div id="toast-container" class="fixed bottom-8 right-8 z-[300] space-y-3"></div>
-
-    <script>
-        // 初始化狀態
-        window.currentSearch = '';
-        window.currentModalState = { mIdx: null, tIdx: null, isEditing: false };
-
         async function saveToCloud() {
             if (!window.currentUser || !window.db) return;
             const { doc, setDoc } = window.firebaseModules;
             const docRef = doc(window.db, 'artifacts', window.appId, 'public', 'data', 'main', 'master_data');
-            try {
-                await setDoc(docRef, { 
-                    modules: window.wbsData, 
-                    lastUpdated: new Date().toISOString(),
-                    updatedBy: window.currentUser.uid 
-                });
-                updateUI("資料已同步");
-            } catch (error) {
-                console.error("Firestore Write Error:", error);
-                if (error.code === 'permission-denied') {
-                    showToast("寫入失敗：請至控制台設定資料庫規則", "error");
-                }
-            }
+            await setDoc(docRef, { 
+                modules: window.wbsData, 
+                lastUpdated: new Date().toISOString(),
+                updatedBy: window.currentUser.uid
+            });
         }
 
         function parseCSV(csv) {
             const rows = csv.split('\n').map(r => r.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.replace(/^"|"$/g, '').trim()));
-            const tasks = [];
-            let cur = null;
+            const tasks = []; let cur = null;
             rows.slice(1).forEach(row => {
                 if (!row[0] && !row[2]) return;
                 if (row[0]) { cur = { name: row[0], steps: [] }; tasks.push(cur); }
@@ -318,10 +160,11 @@
 
         function updateUI(status) {
             updateStatus(status, "green");
-            document.getElementById('last-sync-time').innerText = new Date().toLocaleTimeString();
+            const syncTime = document.getElementById('last-sync-time');
+            if (syncTime) syncTime.innerText = new Date().toLocaleTimeString();
             updateStats();
             renderGrid();
-            lucide.createIcons();
+            if (window.lucide) lucide.createIcons();
         }
 
         function updateStatus(text, color) {
@@ -331,6 +174,137 @@
             if (textEl) textEl.innerText = text;
         }
 
+        window.onload = () => {
+            if (sessionStorage.getItem('is_authenticated') === 'true') {
+                document.getElementById('auth-overlay')?.classList.add('hidden');
+                initFirebase();
+            }
+            if (window.lucide) lucide.createIcons();
+            document.getElementById('passcode-input')?.addEventListener('keypress', (e) => { if (e.key === 'Enter') window.checkPasscode(); });
+        };
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700;900&display=swap');
+        body { font-family: 'Noto Sans TC', sans-serif; background-color: #f8fafc; color: #1e293b; -webkit-tap-highlight-color: transparent; }
+        .glass-nav { background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(20px); border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
+        .gem-card { transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); background: white; border: 1px solid #f1f5f9; cursor: pointer; }
+        .gem-card:hover { transform: translateY(-8px); box-shadow: 0 25px 50px -12px rgba(99, 102, 241, 0.12); border-color: #e2e8f0; }
+        .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body class="flex flex-col min-h-screen">
+
+    <!-- 通行碼遮罩 -->
+    <div id="auth-overlay" class="fixed inset-0 z-[1000] bg-slate-900 flex items-center justify-center p-6">
+        <div class="max-w-md w-full bg-white rounded-[40px] p-10 shadow-2xl text-center">
+            <div class="inline-flex p-5 rounded-3xl bg-indigo-50 text-indigo-600 mb-6"><i data-lucide="shield-check" class="w-10 h-10"></i></div>
+            <h2 class="text-2xl font-black text-slate-900 mb-2">永隆牧場數位中心</h2>
+            <p class="text-slate-400 text-sm mb-8">發佈中心：請輸入通行碼</p>
+            <input type="password" id="passcode-input" placeholder="Passcode" class="w-full px-6 py-4 bg-slate-100 rounded-2xl text-center text-xl font-bold mb-4 outline-none border border-transparent focus:border-indigo-300">
+            <p id="passcode-error" class="hidden text-rose-500 text-xs font-bold mb-4">驗證失敗</p>
+            <button onclick="window.checkPasscode()" class="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black text-lg">登入系統</button>
+        </div>
+    </div>
+
+    <!-- 同步確認視窗 -->
+    <div id="confirm-modal" class="fixed inset-0 z-[1100] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 hidden">
+        <div class="max-w-lg w-full bg-white rounded-[40px] p-10 shadow-2xl text-center animate-fade-in">
+            <div class="inline-flex p-5 rounded-3xl bg-blue-50 text-blue-600 mb-6"><i data-lucide="refresh-cw" class="w-10 h-10"></i></div>
+            <h2 class="text-2xl font-black text-slate-900 mb-4">同步雲端數據庫</h2>
+            <p id="confirm-message" class="text-slate-500 leading-relaxed mb-10 whitespace-pre-line"></p>
+            <div class="flex gap-4">
+                <button onclick="window.closeConfirmModal()" class="flex-1 py-4 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200">取消</button>
+                <button onclick="window.executeConfirm()" class="flex-1 py-4 bg-indigo-600 text-white rounded-2xl font-bold shadow-lg shadow-indigo-100 hover:bg-indigo-700">確定同步</button>
+            </div>
+        </div>
+    </div>
+
+    <header class="glass-nav sticky top-0 z-[100] px-6 py-4 shadow-sm">
+        <div class="max-w-[1500px] mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
+            <div class="flex items-center gap-4">
+                <div class="bg-indigo-600 p-3 rounded-2xl text-white shadow-lg"><i data-lucide="book-open" class="w-7 h-7"></i></div>
+                <div>
+                    <h1 class="text-2xl font-black text-slate-900 tracking-tighter">Gem 養豬專家</h1>
+                    <div class="flex items-center gap-2">
+                        <span id="sync-status-dot" class="w-2 h-2 bg-slate-300 rounded-full"></span>
+                        <p id="sync-status-text" class="text-[11px] text-slate-400 font-bold uppercase tracking-widest">系統就緒</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="flex-1 max-w-xl w-full">
+                <div class="relative">
+                    <i data-lucide="search" class="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400"></i>
+                    <input type="text" id="searchInput" oninput="window.handleSearch()" placeholder="快速關鍵字搜尋..." class="w-full pl-12 pr-4 py-3 bg-slate-100/80 rounded-2xl outline-none focus:bg-white transition-all shadow-inner">
+                </div>
+            </div>
+
+            <button onclick="window.requestGSheetSync()" class="flex items-center gap-2 px-6 py-3 rounded-2xl bg-indigo-600 text-white font-bold text-sm shadow-xl shadow-indigo-100 hover:bg-indigo-700 transition-all group">
+                <i data-lucide="refresh-cw" id="gsync-icon" class="w-4 h-4"></i>
+                <span>更新發佈內容</span>
+            </button>
+        </div>
+    </header>
+
+    <main class="flex-1 max-w-[1500px] w-full mx-auto px-6 py-8">
+        <!-- 狀態看板 -->
+        <section class="grid grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
+            <div class="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm">
+                <p class="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3">當前 UID</p>
+                <p id="user-display" class="text-xs font-mono text-slate-400 truncate">Waiting...</p>
+            </div>
+            <div class="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm">
+                <p class="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3">SOP 總量</p>
+                <h2 id="stats-sop-count" class="text-4xl font-black text-slate-900">--</h2>
+            </div>
+            <div class="bg-emerald-600 p-6 rounded-[32px] shadow-xl text-white">
+                <p class="text-emerald-200 text-[11px] font-black uppercase tracking-widest mb-3">運行狀態</p>
+                <div class="flex items-center gap-3"><i data-lucide="check-circle" class="w-6 h-6"></i><h2 class="text-xl font-bold italic">唯讀發佈中</h2></div>
+            </div>
+            <div class="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm">
+                <p class="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3">最後異動</p>
+                <h2 id="last-sync-time" class="text-2xl font-bold tabular-nums">--:--:--</h2>
+            </div>
+        </section>
+        
+        <!-- SOP 格狀布局 -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8" id="main-grid"></div>
+    </main>
+
+    <!-- SOP 詳情 (唯讀版) -->
+    <div id="sop-modal" class="fixed inset-0 z-[200] flex items-center justify-center p-4 md:p-8 hidden">
+        <div class="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onclick="window.closeSOP()"></div>
+        <div class="relative bg-white w-full max-w-4xl rounded-[40px] shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-fade-in">
+            <div class="p-8 border-b border-slate-100 flex justify-between items-start bg-slate-50/50">
+                <div class="flex items-center gap-6">
+                    <div id="modal-icon-container" class="w-16 h-16 rounded-[24px] flex items-center justify-center shadow-inner">
+                        <i id="modal-icon" data-lucide="book-open" class="w-8 h-8"></i>
+                    </div>
+                    <div>
+                        <div class="flex items-center gap-2 mb-1.5">
+                            <span id="modal-tag" class="text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest"></span>
+                            <span class="text-[10px] font-bold text-slate-400">YONG LONG FARM SOP</span>
+                        </div>
+                        <h3 id="modal-title" class="text-3xl font-black text-slate-900 tracking-tight leading-tight"></h3>
+                    </div>
+                </div>
+                <button onclick="window.closeSOP()" class="p-3 text-slate-400 hover:text-rose-500 transition-colors"><i data-lucide="x" class="w-8 h-8"></i></button>
+            </div>
+            
+            <div class="p-8 md:p-12 overflow-y-auto bg-white flex-1" id="sop-steps-container"></div>
+            
+            <div class="p-6 bg-slate-50 border-t border-slate-100 flex justify-between items-center">
+                <p class="text-[11px] text-slate-400 font-medium italic">※ 此內容由雲端發佈中心同步，不可於此處修改。</p>
+                <button onclick="window.closeSOP()" class="px-12 py-4 bg-slate-900 text-white rounded-2xl font-bold shadow-lg shadow-slate-200 hover:bg-slate-800 active:scale-95 transition-all">完成檢閱</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast-container" class="fixed bottom-8 right-8 z-[300] space-y-3"></div>
+
+    <script>
         function renderGrid() {
             const grid = document.getElementById('main-grid');
             if (!grid) return;
@@ -339,13 +313,13 @@
                 (m.tasks && m.tasks.some(t => t.name.includes(window.currentSearch)))
             );
 
-            grid.innerHTML = filtered.map((m, idx) => `
+            grid.innerHTML = filtered.map((m) => `
                 <div class="gem-card rounded-[40px] p-8 flex flex-col animate-fade-in shadow-sm">
                     <div class="flex items-center gap-4 mb-8">
                         <div class="p-4 rounded-2xl ${m.bgColor} ${m.color} shadow-inner"><i data-lucide="${m.icon}" class="w-6 h-6"></i></div>
                         <div>
                             <p class="text-[10px] font-black text-slate-300 tracking-widest uppercase">WBS ${m.id}</p>
-                            <h3 class="text-xl font-bold text-slate-800">${m.title}</h3>
+                            <h3 class="text-xl font-bold text-slate-800 tracking-tight">${m.title}</h3>
                         </div>
                     </div>
                     <div class="space-y-2 flex-1">
@@ -361,65 +335,44 @@
                     </div>
                 </div>
             `).join('');
-            lucide.createIcons();
+            if (window.lucide) lucide.createIcons();
         }
 
         window.openSOP = (mIdx, tIdx) => {
-            window.currentModalState = { mIdx, tIdx, isEditing: false };
+            window.currentMIdx = mIdx;
+            window.currentTIdx = tIdx;
+            renderSteps(mIdx, tIdx);
+            document.getElementById('sop-modal')?.classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
+        };
+
+        function renderSteps(mIdx, tIdx) {
             const module = window.wbsData[mIdx];
             const task = module.tasks[tIdx];
+            if (!task) return;
+
             document.getElementById('modal-title').innerText = task.name;
-            document.getElementById('modal-tag').innerText = `MOD ${module.id}`;
+            document.getElementById('modal-tag').innerText = `WBS ${module.id}`;
             document.getElementById('modal-tag').className = `text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest ${module.bgColor} ${module.color}`;
             document.getElementById('modal-icon-container').className = `w-16 h-16 rounded-[24px] shadow-inner flex items-center justify-center ${module.bgColor} ${module.color}`;
             document.getElementById('modal-icon').setAttribute('data-lucide', module.icon);
-            renderSteps();
-            document.getElementById('sop-modal').classList.remove('hidden');
-            document.getElementById('edit-indicator').classList.add('hidden');
-            document.getElementById('save-btn').classList.add('hidden');
-            document.body.style.overflow = 'hidden';
-            lucide.createIcons();
-        };
 
-        function renderSteps() {
-            const task = window.wbsData[window.currentModalState.mIdx]?.tasks[window.currentModalState.tIdx];
-            if (!task) return;
             const container = document.getElementById('sop-steps-container');
-            if (window.currentModalState.isEditing) {
-                container.innerHTML = `<div class="space-y-4">
-                    <input type="text" id="edit-task-name" value="${task.name}" class="w-full p-4 bg-slate-50 border rounded-2xl text-xl font-bold outline-none">
-                    <textarea id="edit-steps-content" class="w-full h-64 p-6 bg-slate-50 border rounded-2xl font-medium leading-relaxed outline-none">${task.steps.join('\n')}</textarea>
-                </div>`;
-            } else {
-                container.innerHTML = task.steps.map((s, i) => `
-                    <div class="flex gap-6 items-start p-6 rounded-[28px] bg-slate-50 border border-slate-100 mb-4">
-                        <div class="w-10 h-10 rounded-xl bg-white border border-slate-200 text-indigo-600 flex items-center justify-center font-black text-sm shadow-sm">${i + 1}</div>
-                        <p class="text-lg font-bold text-slate-700 leading-relaxed pt-1">${s}</p>
-                    </div>
-                `).join('');
-            }
+            container.innerHTML = task.steps.map((s, i) => `
+                <div class="flex gap-6 items-start p-6 rounded-[28px] bg-slate-50 border border-slate-100 mb-4 hover:shadow-md transition-shadow">
+                    <div class="w-10 h-10 rounded-xl bg-white border border-slate-200 text-indigo-600 flex items-center justify-center font-black text-sm shadow-sm">${i + 1}</div>
+                    <p class="text-lg font-bold text-slate-700 leading-relaxed pt-1">${s}</p>
+                </div>
+            `).join('');
+            if (window.lucide) lucide.createIcons();
         }
-
-        window.toggleEditMode = () => {
-            window.currentModalState.isEditing = !window.currentModalState.isEditing;
-            document.getElementById('edit-indicator').classList.toggle('hidden', !window.currentModalState.isEditing);
-            document.getElementById('save-btn').classList.toggle('hidden', !window.currentModalState.isEditing);
-            renderSteps();
-        };
-
-        window.saveSOPChanges = async () => {
-            const newName = document.getElementById('edit-task-name').value;
-            const newSteps = document.getElementById('edit-steps-content').value.split('\n').filter(s => s.trim() !== '');
-            window.wbsData[window.currentModalState.mIdx].tasks[window.currentModalState.tIdx].name = newName;
-            window.wbsData[window.currentModalState.mIdx].tasks[window.currentModalState.tIdx].steps = newSteps;
-            await saveToCloud();
-            showToast("變更已保存", "success");
-            window.toggleEditMode();
-        };
 
         window.closeSOP = () => { document.getElementById('sop-modal').classList.add('hidden'); document.body.style.overflow = ''; };
         window.handleSearch = () => { window.currentSearch = document.getElementById('searchInput').value; renderGrid(); };
-        
+        window.showConfirmModal = function(msg, action) { document.getElementById('confirm-message').innerText = msg; document.getElementById('confirm-modal').classList.remove('hidden'); window.onConfirmAction = action; };
+        window.closeConfirmModal = function() { document.getElementById('confirm-modal').classList.add('hidden'); };
+        window.executeConfirm = function() { if (window.onConfirmAction) window.onConfirmAction(); };
+
         function updateStats() {
             let total = 0;
             if (window.wbsData) window.wbsData.forEach(m => total += (m.tasks ? m.tasks.length : 0));
@@ -432,19 +385,9 @@
             toast.className = `px-6 py-4 rounded-2xl shadow-xl text-white font-bold flex items-center gap-3 animate-fade-in ${type === 'success' ? 'bg-emerald-600' : 'bg-rose-600'}`;
             toast.innerHTML = `<i data-lucide="${type === 'success' ? 'check' : 'alert-circle'}" class="w-5 h-5"></i> ${msg}`;
             container.appendChild(toast);
-            lucide.createIcons();
-            setTimeout(() => toast.remove(), 3000);
+            if (window.lucide) lucide.createIcons();
+            setTimeout(() => toast.remove(), 4000);
         }
-
-        window.exportToExcel = () => {
-            const wb = XLSX.utils.book_new();
-            window.wbsData.forEach(m => {
-                const data = [["模組", "任務", "內容"]];
-                m.tasks.forEach(t => t.steps.forEach((s, i) => data.push([m.title, i===0?t.name:"", s])));
-                XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), m.id);
-            });
-            XLSX.writeFile(wb, `PigExpert_Backup_${new Date().toLocaleDateString()}.xlsx`);
-        };
     </script>
 </body>
 </html>
