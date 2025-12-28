@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gem 養豬專家 | 永隆牧場 雲端數位中心</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+    
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // ==========================================
+        // 🛠️ [Firebase 配置區]
+        // 請將此處內容替換為您在 Firebase Console 取得的金鑰
+        // ==========================================
+        const myFirebaseConfig = {
+            apiKey: "AIzaSyBQy2B-um_b2YfSJ4P53MlsvdfriQi36jo",
+            authDomain: "pig-expert-2025.firebaseapp.com",
+            projectId: "pig-expert-2025",
+            storageBucket: "pig-expert-2025.firebasestorage.app",
+            messagingSenderId: "7763114998",
+            appId: "1:7763114998:web:0a2215a56ee8cbd089a5d7"
+        };
+        // ==========================================
+
+        // 設定預設通行碼 (您可以自行修改下方引號內的文字)
+        const MASTER_PASSCODE = "YL2025"; 
+
+        window.firebaseModules = { doc, setDoc, getDoc, collection, onSnapshot };
+        window.appId = "yong-long-pig-expert";
+
+        // 檢查通行碼邏輯
+        window.checkPasscode = function() {
+            const input = document.getElementById('passcode-input').value;
+            const errorMsg = document.getElementById('passcode-error');
+            
+            if (input === MASTER_PASSCODE) {
+                // 通行碼正確，儲存狀態並進入系統
+                sessionStorage.setItem('is_authenticated', 'true');
+                document.getElementById('auth-overlay').classList.add('hidden');
+                initFirebase();
+            } else {
+                errorMsg.classList.remove('hidden');
+                document.getElementById('passcode-input').value = "";
+            }
+        };
+
+        function initFirebase() {
+            if (!myFirebaseConfig.apiKey || myFirebaseConfig.apiKey.includes("在此填入")) {
+                const grid = document.getElementById('main-grid');
+                grid.innerHTML = `<div class="col-span-full py-20 text-center text-rose-500 font-bold bg-white rounded-3xl border border-rose-100">
+                    <p class="text-xl mb-2">⚠️ 尚未配置 Firebase 金鑰</p>
+                    <p class="text-sm opacity-70">請編輯 index.html 填入配置後重新上傳。</p>
+                </div>`;
+                return;
+            }
+
+            const app = initializeApp(myFirebaseConfig);
+            const auth = getAuth(app);
+            window.db = getFirestore(app);
+
+            onAuthStateChanged(auth, (user) => {
+                window.currentUser = user;
+                if (user) {
+                    document.getElementById('user-display').innerText = user.uid;
+                    loadCloudData();
+                } else {
+                    signInAnonymously(auth);
+                }
+            });
+        }
+
+        // 頁面載入檢查
+        window.onload = () => {
+            if (sessionStorage.getItem('is_authenticated') === 'true') {
+                document.getElementById('auth-overlay').classList.add('hidden');
+                initFirebase();
+            }
+            lucide.createIcons();
+            
+            // 監聽 Enter 鍵
+            document.getElementById('passcode-input')?.addEventListener('keypress', function (e) {
+                if (e.key === 'Enter') checkPasscode();
+            });
+        };
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700;900&display=swap');
+        body { font-family: 'Noto Sans TC', sans-serif; background-color: #f8fafc; color: #1e293b; -webkit-tap-highlight-color: transparent; }
+        .glass-nav { background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(20px); border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
+        .gem-card { transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); background: white; }
+        .gem-card:hover { transform: translateY(-8px); box-shadow: 0 25px 50px -12px rgba(99, 102, 241, 0.12); }
+        .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body class="flex flex-col min-h-screen">
+
+    <!-- [安全性] 通行碼驗證遮罩 -->
+    <div id="auth-overlay" class="fixed inset-0 z-[1000] bg-slate-900 flex items-center justify-center p-6">
+        <div class="max-w-md w-full bg-white rounded-[40px] p-10 shadow-2xl text-center animate-fade-in">
+            <div class="inline-flex p-5 rounded-3xl bg-indigo-50 text-indigo-600 mb-6">
+                <i data-lucide="shield-check" class="w-10 h-10"></i>
+            </div>
+            <h2 class="text-2xl font-black text-slate-900 mb-2">永隆牧場數位中心</h2>
+            <p class="text-slate-400 text-sm mb-8">請輸入通行碼以存取雲端 SOP 資料</p>
+            
+            <div class="space-y-4">
+                <input type="password" id="passcode-input" placeholder="請輸入通行碼" 
+                       class="w-full px-6 py-4 bg-slate-100 rounded-2xl text-center text-xl font-bold tracking-widest outline-none focus:ring-4 ring-indigo-500/20 transition-all border border-transparent focus:border-indigo-200">
+                <p id="passcode-error" class="hidden text-rose-500 text-xs font-bold animate-pulse">通行碼錯誤，請重新輸入</p>
+                <button onclick="checkPasscode()" class="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black text-lg shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all active:scale-95">
+                    啟動系統
+                </button>
+            </div>
+            <p class="mt-8 text-[10px] text-slate-300 uppercase tracking-widest font-bold">Encrypted Connection</p>
+        </div>
+    </div>
+
+    <!-- 導航列 -->
+    <header class="glass-nav sticky top-0 z-[100] px-6 py-4 shadow-sm">
+        <div class="max-w-[1500px] mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
+            <div class="flex items-center gap-4 group">
+                <div class="bg-indigo-600 p-3 rounded-2xl text-white shadow-lg">
+                    <i data-lucide="layout-dashboard" class="w-7 h-7"></i>
+                </div>
+                <div>
+                    <h1 class="text-2xl font-black bg-clip-text text-transparent bg-gradient-to-r from-slate-900 to-indigo-600 tracking-tighter">Gem 養豬專家</h1>
+                    <div class="flex items-center gap-2">
+                        <span id="sync-status-dot" class="w-2 h-2 bg-slate-300 rounded-full"></span>
+                        <p id="sync-status-text" class="text-[11px] text-slate-400 font-bold uppercase tracking-widest">系統就緒</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="flex-1 max-w-xl w-full">
+                <div class="relative">
+                    <i data-lucide="search" class="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400"></i>
+                    <input type="text" id="searchInput" oninput="handleSearch()" placeholder="快速搜尋關鍵字..." 
+                           class="w-full pl-12 pr-4 py-3 bg-slate-100/80 border border-transparent rounded-2xl text-base focus:bg-white focus:border-indigo-300 outline-none transition-all">
+                </div>
+            </div>
+
+            <div class="flex items-center gap-3">
+                <button onclick="syncFromGSheets()" class="flex items-center gap-2 px-5 py-3 rounded-2xl bg-white border border-slate-200 text-slate-600 font-bold text-sm hover:bg-slate-50 transition-all">
+                    <i data-lucide="refresh-cw" id="gsync-icon" class="w-4 h-4"></i>
+                    <span>試算表匯入</span>
+                </button>
+                <button onclick="exportToExcel()" class="px-5 py-3 rounded-2xl bg-slate-900 text-white font-bold text-sm hover:bg-slate-800 transition-all">
+                    Excel 備份
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-1 max-w-[1500px] w-full mx-auto px-6 py-8">
+        <!-- 儀表板 -->
+        <section class="grid grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
+            <div class="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm">
+                <p class="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3">當前 UID</p>
+                <p id="user-display" class="text-xs font-mono text-slate-400 break-all truncate">Waiting...</p>
+            </div>
+            <div class="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm">
+                <p class="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3">SOP 總量</p>
+                <h2 id="stats-sop-count" class="text-4xl font-black text-slate-900">--</h2>
+            </div>
+            <div class="bg-indigo-600 p-6 rounded-[32px] shadow-xl text-white">
+                <p class="text-indigo-200 text-[11px] font-black uppercase tracking-widest mb-3">安全狀態</p>
+                <div class="flex items-center gap-3">
+                    <i data-lucide="shield-check" class="w-6 h-6"></i>
+                    <h2 class="text-xl font-bold">通行碼保護中</h2>
+                </div>
+            </div>
+            <div class="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm">
+                <p class="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3">最後同步</p>
+                <h2 id="last-sync-time" class="text-2xl font-bold">--:--:--</h2>
+            </div>
+        </section>
+
+        <!-- 卡片區域 -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8" id="main-grid">
+            <div class="col-span-full py-20 text-center text-slate-400">
+                <div class="animate-spin inline-block mb-4"><i data-lucide="loader-2" class="w-10 h-10"></i></div>
+                <p>同步雲端數據中...</p>
+            </div>
+        </div>
+    </main>
+
+    <!-- Modal -->
+    <div id="sop-modal" class="fixed inset-0 z-[200] flex items-center justify-center p-4 md:p-8 hidden">
+        <div class="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onclick="closeSOP()"></div>
+        <div class="relative bg-white w-full max-w-4xl rounded-[40px] shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-fade-in">
+            <div class="p-8 border-b border-slate-100 flex justify-between items-start bg-slate-50/50">
+                <div class="flex items-center gap-6">
+                    <div id="modal-icon-container" class="w-16 h-16 rounded-[24px] flex items-center justify-center shadow-inner">
+                        <i id="modal-icon" data-lucide="book-open" class="w-8 h-8"></i>
+                    </div>
+                    <div>
+                        <div class="flex items-center gap-2 mb-1.5">
+                            <span id="modal-tag" class="text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest"></span>
+                            <span id="edit-indicator" class="hidden text-[10px] font-black text-amber-600 bg-amber-50 px-2 py-0.5 rounded italic animate-pulse">編輯模式</span>
+                        </div>
+                        <h3 id="modal-title" class="text-3xl font-black text-slate-900 tracking-tight leading-tight"></h3>
+                    </div>
+                </div>
+                <div class="flex gap-2">
+                    <button id="edit-toggle-btn" onclick="toggleEditMode()" class="p-3 bg-white border border-slate-200 text-slate-600 rounded-2xl hover:bg-slate-50 transition-all shadow-sm">
+                        <i data-lucide="edit-3" class="w-6 h-6"></i>
+                    </button>
+                    <button onclick="closeSOP()" class="p-3 text-slate-400 hover:text-rose-500">
+                        <i data-lucide="x" class="w-6 h-6"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="p-8 md:p-12 overflow-y-auto bg-white flex-1" id="sop-steps-container"></div>
+            <div class="p-6 bg-slate-50/80 border-t border-slate-100 flex items-center justify-between">
+                <p class="text-[11px] text-slate-400 font-medium italic">※ 修改將自動同步至所有裝置</p>
+                <div class="flex gap-3">
+                    <button onclick="closeSOP()" class="px-8 py-4 bg-white border border-slate-200 text-slate-600 rounded-2xl font-bold">關閉</button>
+                    <button id="save-btn" onclick="saveSOPChanges()" class="hidden px-10 py-4 bg-indigo-600 text-white rounded-2xl font-bold shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all">儲存修改</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast-container" class="fixed bottom-8 right-8 z-[300] space-y-3"></div>
+
+    <script>
+        // 通用狀態與邏輯
+        let wbsData = [];
+        let searchTerm = '';
+        let currentModalState = { mIdx: null, tIdx: null, isEditing: false };
+        let unsubscribe = null;
+
+        async function loadCloudData() {
+            if (!window.db) return;
+            const { doc, onSnapshot } = window.firebaseModules;
+            if (unsubscribe) unsubscribe();
+
+            const docRef = doc(window.db, 'artifacts', window.appId, 'public', 'data', 'main', 'master_data');
+            unsubscribe = onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    wbsData = docSnap.data().modules;
+                    updateUI("雲端即時連線中");
+                } else {
+                    syncFromGSheets();
+                }
+            });
+        }
+
+        async function syncFromGSheets() {
+            const syncIcon = document.getElementById('gsync-icon');
+            if (syncIcon) syncIcon.classList.add('animate-spin');
+            updateStatus("同步中...", "yellow");
+
+            try {
+                const moduleDefinitions = [
+                    { id: "1.0", title: "繁殖與女豬管理", icon: "heart", color: "text-rose-600", bgColor: "bg-rose-50" },
+                    { id: "2.0", title: "分娩與哺乳模組", icon: "baby", color: "text-indigo-600", bgColor: "bg-indigo-50" },
+                    { id: "3.0", title: "育成肥育與污水", icon: "droplets", color: "text-emerald-600", bgColor: "bg-emerald-50" },
+                    { id: "4.0", title: "生物安全與藥政", icon: "shield-check", color: "text-violet-600", bgColor: "bg-violet-50" },
+                    { id: "5.0", title: "供應鏈與飼料", icon: "truck", color: "text-amber-600", bgColor: "bg-amber-50" },
+                    { id: "6.0", title: "動力設備與維護", icon: "wrench", color: "text-slate-600", bgColor: "bg-slate-100" }
+                ];
+
+                const results = await Promise.all(moduleDefinitions.map(async (def) => {
+                    const sheetName = `${def.id} ${def.title}`;
+                    const url = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}`;
+                    const response = await fetch(url);
+                    const csvText = await response.text();
+                    return { ...def, tasks: parseCSV(csvText) };
+                }));
+
+                wbsData = results;
+                await saveToCloud();
+                showToast("試算表匯入成功", "success");
+            } catch (error) {
+                showToast("匯入失敗", "error");
+            } finally {
+                if (syncIcon) syncIcon.classList.remove('animate-spin');
+            }
+        }
+
+        async function saveToCloud() {
+            if (!window.currentUser || !window.db) return;
+            const { doc, setDoc } = window.firebaseModules;
+            const docRef = doc(window.db, 'artifacts', window.appId, 'public', 'data', 'main', 'master_data');
+            await setDoc(docRef, { 
+                modules: wbsData, 
+                lastUpdated: new Date().toISOString(),
+                updatedBy: window.currentUser.uid 
+            });
+        }
+
+        function parseCSV(csv) {
+            const rows = csv.split('\n').map(r => r.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.replace(/^"|"$/g, '').trim()));
+            const tasks = [];
+            let cur = null;
+            rows.slice(1).forEach(row => {
+                if (!row[0] && !row[2]) return;
+                if (row[0]) { cur = { name: row[0], steps: [] }; tasks.push(cur); }
+                if (cur && row[2]) cur.steps.push(row[2]);
+            });
+            return tasks;
+        }
+
+        function updateUI(status) {
+            updateStatus(status, "green");
+            document.getElementById('last-sync-time').innerText = new Date().toLocaleTimeString();
+            updateStats();
+            renderGrid();
+            lucide.createIcons();
+        }
+
+        function updateStatus(text, color) {
+            const dot = document.getElementById('sync-status-dot');
+            const textEl = document.getElementById('sync-status-text');
+            if (dot) dot.className = `w-2 h-2 rounded-full bg-${color}-500`;
+            if (textEl) textEl.innerText = text;
+        }
+
+        function renderGrid() {
+            const grid = document.getElementById('main-grid');
+            if (!grid) return;
+            const filtered = wbsData.filter(m => 
+                m.title.includes(searchTerm) || m.id.includes(searchTerm) ||
+                m.tasks.some(t => t.name.includes(searchTerm))
+            );
+
+            grid.innerHTML = filtered.map((m, idx) => `
+                <div class="gem-card rounded-[40px] p-8 flex flex-col border border-slate-100 shadow-sm animate-fade-in">
+                    <div class="flex items-center gap-4 mb-8">
+                        <div class="p-4 rounded-2xl ${m.bgColor} ${m.color} shadow-sm">
+                            <i data-lucide="${m.icon}" class="w-6 h-6"></i>
+                        </div>
+                        <div>
+                            <p class="text-[10px] font-black text-slate-300 tracking-widest uppercase">WBS ${m.id}</p>
+                            <h3 class="text-xl font-bold text-slate-800 tracking-tight">${m.title}</h3>
+                        </div>
+                    </div>
+                    <div class="space-y-2 flex-1">
+                        ${m.tasks.map((t, tIdx) => `
+                            <button onclick="openSOP(${wbsData.findIndex(orig => orig.id === m.id)}, ${tIdx})" class="w-full flex items-center justify-between p-4 rounded-xl bg-slate-50 border border-slate-100 hover:bg-slate-900 hover:text-white transition-all text-left group">
+                                <span class="text-sm font-bold truncate pr-4">${t.name}</span>
+                                <i data-lucide="chevron-right" class="w-4 h-4 text-slate-300 group-hover:translate-x-1 transition-all"></i>
+                            </button>
+                        `).join('')}
+                    </div>
+                </div>
+            `).join('');
+            lucide.createIcons();
+        }
+
+        function openSOP(mIdx, tIdx) {
+            currentModalState = { mIdx, tIdx, isEditing: false };
+            const module = wbsData[mIdx];
+            const task = module.tasks[tIdx];
+            document.getElementById('modal-title').innerText = task.name;
+            document.getElementById('modal-tag').innerText = `MOD ${module.id}`;
+            document.getElementById('modal-tag').className = `text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest ${module.bgColor} ${module.color}`;
+            document.getElementById('modal-icon-container').className = `w-16 h-16 rounded-[24px] shadow-inner flex items-center justify-center ${module.bgColor} ${module.color}`;
+            document.getElementById('modal-icon').setAttribute('data-lucide', module.icon);
+            renderSteps();
+            document.getElementById('sop-modal').classList.remove('hidden');
+            document.getElementById('edit-indicator').classList.add('hidden');
+            document.getElementById('save-btn').classList.add('hidden');
+            document.body.style.overflow = 'hidden';
+            lucide.createIcons();
+        }
+
+        function renderSteps() {
+            const task = wbsData[currentModalState.mIdx]?.tasks[currentModalState.tIdx];
+            if (!task) return;
+            const container = document.getElementById('sop-steps-container');
+            if (currentModalState.isEditing) {
+                container.innerHTML = `<div class="space-y-4">
+                    <input type="text" id="edit-task-name" value="${task.name}" class="w-full p-4 bg-slate-50 border rounded-2xl text-xl font-bold outline-none">
+                    <textarea id="edit-steps-content" class="w-full h-64 p-6 bg-slate-50 border rounded-2xl font-medium leading-relaxed outline-none">${task.steps.join('\n')}</textarea>
+                </div>`;
+            } else {
+                container.innerHTML = task.steps.map((s, i) => `
+                    <div class="flex gap-6 items-start p-6 rounded-[28px] bg-slate-50 border border-slate-100 mb-4">
+                        <div class="w-10 h-10 rounded-xl bg-white border border-slate-200 text-indigo-600 flex items-center justify-center font-black text-sm shadow-sm">${i + 1}</div>
+                        <p class="text-lg font-bold text-slate-700 leading-relaxed pt-1">${s}</p>
+                    </div>
+                `).join('');
+            }
+        }
+
+        window.toggleEditMode = () => {
+            currentModalState.isEditing = !currentModalState.isEditing;
+            document.getElementById('edit-indicator').classList.toggle('hidden', !currentModalState.isEditing);
+            document.getElementById('save-btn').classList.toggle('hidden', !currentModalState.isEditing);
+            renderSteps();
+        };
+
+        window.saveSOPChanges = async () => {
+            const newName = document.getElementById('edit-task-name').value;
+            const newSteps = document.getElementById('edit-steps-content').value.split('\n').filter(s => s.trim() !== '');
+            wbsData[currentModalState.mIdx].tasks[currentModalState.tIdx].name = newName;
+            wbsData[currentModalState.mIdx].tasks[currentModalState.tIdx].steps = newSteps;
+            await saveToCloud();
+            showToast("變更已保存至雲端", "success");
+            toggleEditMode();
+        };
+
+        window.closeSOP = () => { document.getElementById('sop-modal').classList.add('hidden'); document.body.style.overflow = ''; };
+        window.handleSearch = () => { searchTerm = document.getElementById('searchInput').value; renderGrid(); };
+        window.syncFromGSheets = syncFromGSheets;
+        window.openSOP = openSOP;
+        function updateStats() {
+            let total = 0;
+            wbsData.forEach(m => total += m.tasks.length);
+            document.getElementById('stats-sop-count').innerText = total.toString().padStart(2, '0');
+        }
+        function showToast(msg, type) {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `px-6 py-4 rounded-2xl shadow-xl text-white font-bold flex items-center gap-3 animate-fade-in ${type === 'success' ? 'bg-emerald-600' : 'bg-rose-600'}`;
+            toast.innerHTML = `<i data-lucide="${type === 'success' ? 'check' : 'alert-circle'}" class="w-5 h-5"></i> ${msg}`;
+            container.appendChild(toast);
+            lucide.createIcons();
+            setTimeout(() => toast.remove(), 3000);
+        }
+        window.exportToExcel = () => {
+            const wb = XLSX.utils.book_new();
+            wbsData.forEach(m => {
+                const data = [["模組", "任務", "內容"]];
+                m.tasks.forEach(t => t.steps.forEach((s, i) => data.push([m.title, i===0?t.name:"", s])));
+                XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), m.id);
+            });
+            XLSX.writeFile(wb, `PigExpert_Backup_${new Date().toLocaleDateString()}.xlsx`);
+        };
+    </script>
+</body>
+</html>
