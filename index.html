@@ -3,21 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gem 養豬專家 | 永隆牧場 2025 雲端發佈中心</title>
+    <title>永隆智慧農場 | IndexedDB 離線 APP</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
     
-    <!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, updateDoc, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // ==========================================
-        // 🛠️ [Firebase 配置區]
-        // ==========================================
-        const myFirebaseConfig = {
+        const firebaseConfig = {
             apiKey: "AIzaSyBQy2B-um_b2YfSJ4P53MlsvdfriQi36jo",
             authDomain: "pig-expert-2025.firebaseapp.com",
             projectId: "pig-expert-2025",
@@ -25,369 +21,460 @@
             messagingSenderId: "7763114998",
             appId: "1:7763114998:web:0a2215a56ee8cbd089a5d7"
         };
+
+        // --- 管理員與資料庫配置 ---
+        const SPREADSHEET_ID = '1Q_xd4aNarphGl_7REybhYsp4mRNvCbWXeqDgts89w2k'; 
+        const TAB_WBS = 'Batch_WBS'; 
+        const TAB_STAFF = 'Staff_Config';
+        const TAB_LIBRARY = 'SOP_Library'; 
+        const MASTER_PASSCODE = "YL2025";
+        window.BATCH_ANCHOR_DATE = "2025-12-08"; 
+
         // ==========================================
-
-        const SPREADSHEET_ID = '1Q_xd4aNarphGl_7REybhYsp4mRNvCbWXeqDgts89w2k';
-        const MASTER_PASSCODE = "YL2025"; 
-        
-        window.firebaseModules = { doc, setDoc, getDoc, collection, onSnapshot };
-        window.appId = "yong-long-pig-expert";
-        window.wbsData = [];
-        window.unsubscribe = null;
-        window.currentSearch = '';
-
-        window.checkPasscode = function() {
-            const input = document.getElementById('passcode-input')?.value;
-            if (input === MASTER_PASSCODE) {
-                sessionStorage.setItem('is_authenticated', 'true');
-                document.getElementById('auth-overlay')?.classList.add('hidden');
-                initFirebase();
-            } else {
-                document.getElementById('passcode-error')?.classList.remove('hidden');
+        // 🛠️ [底層代碼：IndexedDB 管理器]
+        // ==========================================
+        class YL_LocalDB {
+            constructor() {
+                this.dbName = "YL_Farm_DB";
+                this.version = 1;
+                this.storeName = "WBS_Cache";
+                this.db = null;
             }
-        };
 
-        async function initFirebase() {
-            if (!myFirebaseConfig.apiKey || myFirebaseConfig.apiKey.includes("在此填入")) return;
-            try {
-                const app = initializeApp(myFirebaseConfig);
-                const auth = getAuth(app);
-                window.db = getFirestore(app);
-
-                onAuthStateChanged(auth, (user) => {
-                    window.currentUser = user;
-                    if (user) {
-                        const userDisplay = document.getElementById('user-display');
-                        if (userDisplay) userDisplay.innerText = user.uid;
-                        loadCloudData();
-                    }
+            // 初始化資料庫
+            init() {
+                return new Promise((resolve, reject) => {
+                    const request = indexedDB.open(this.dbName, this.version);
+                    request.onupgradeneeded = (e) => {
+                        const db = e.target.result;
+                        if (!db.objectStoreNames.contains(this.storeName)) {
+                            db.createObjectStore(this.storeName, { keyPath: "id" });
+                        }
+                    };
+                    request.onsuccess = (e) => {
+                        this.db = e.target.result;
+                        resolve(this.db);
+                    };
+                    request.onerror = (e) => reject(e.target.error);
                 });
-                await signInAnonymously(auth);
-            } catch (error) {
-                console.error("Firebase Auth Error:", error);
+            }
+
+            // 儲存資料到本地
+            async save(key, data) {
+                if (!this.db) await this.init();
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction([this.storeName], "readwrite");
+                    const store = transaction.objectStore(this.storeName);
+                    store.put({ id: key, content: data, timestamp: Date.now() });
+                    transaction.oncomplete = () => resolve(true);
+                    transaction.onerror = (e) => reject(e.target.error);
+                });
+            }
+
+            // 從本地讀取資料
+            async get(key) {
+                if (!this.db) await this.init();
+                return new Promise((resolve) => {
+                    const transaction = this.db.transaction([this.storeName], "readonly");
+                    const store = transaction.objectStore(this.storeName);
+                    const request = store.get(key);
+                    request.onsuccess = () => resolve(request.result ? request.result.content : null);
+                    request.onerror = () => resolve(null);
+                });
             }
         }
 
-        window.loadCloudData = function() {
-            if (!window.db) return;
+        const localDB = new YL_LocalDB();
+        window.localDB = localDB;
+
+        // --- Firebase 初始化 ---
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        window.db = db;
+        window.firebaseModules = { doc, setDoc, updateDoc, onSnapshot, collection };
+
+        // 啟動 Firebase 內建離線持久化 (基於 IndexedDB)
+        try {
+            await enableIndexedDbPersistence(db);
+            console.log("Firebase 離線同步已就緒");
+        } catch (err) {
+            console.warn("Firestore 持久化受限:", err.code);
+        }
+
+        let masterTasks = [];
+        let staffMapping = {}; 
+        let sopLibraryData = {}; 
+        let dailyProgress = {};
+        window.selectedDate = new Date().toISOString().split('T')[0]; 
+        window.viewMode = 'daily'; 
+        window.unsubscribeDaily = null;
+
+        const MODULE_MAP = {
+            "1.0": { title: "繁殖與女豬管理", color: "text-rose-600", bgColor: "bg-rose-50" },
+            "2.0": { title: "分娩與哺乳模組", color: "text-indigo-600", bgColor: "bg-indigo-50" },
+            "3.0": { title: "育成肥育與污水", color: "text-emerald-600", bgColor: "bg-emerald-50" },
+            "4.0": { title: "生物安全與藥政", color: "text-violet-600", bgColor: "bg-violet-50" },
+            "5.0": { title: "供應鏈與飼料", color: "text-amber-600", bgColor: "bg-amber-50" },
+            "6.0": { title: "動力設備與維護", color: "text-slate-600", bgColor: "bg-slate-50" }
+        };
+
+        const STAFF_ROLES = [
+            { id: "sow_lead", name: "母豬組長", icon: "heart", color: "text-rose-600", bgColor: "bg-rose-50" },
+            { id: "nursery_manager", name: "場長/保育組長", icon: "baby", color: "text-emerald-600", bgColor: "bg-emerald-50" },
+            { id: "porker_lead", name: "肉豬組長", icon: "droplets", color: "text-blue-600", bgColor: "bg-blue-50" },
+            { id: "support", name: "支援/機動組", icon: "shield", color: "text-violet-600", bgColor: "bg-violet-50" }
+        ];
+
+        const WEEK_LOGIC = [
+            { id: 0, name: "配種週 (Breeding)", desc: "重心：公豬採精、母豬大配種、進入產房準備", class: "batch-breeding" },
+            { id: 1, name: "分娩週 (Farrowing)", desc: "重心：測孕、保育舍下高床、迎接大分娩", class: "batch-farrowing" },
+            { id: 2, name: "離乳週 (Weaning)", desc: "重心：保育舍準備、仔豬離乳、清洗產房", class: "batch-weaning" }
+        ];
+
+        const DAY_NAMES = ["週日", "週一", "週二", "週三", "週四", "週五", "週六"];
+
+        // --- 網路監控 ---
+        window.addEventListener('online', updateOnlineStatus);
+        window.addEventListener('offline', updateOnlineStatus);
+        function updateOnlineStatus() {
+            const dot = document.getElementById('network-status-dot');
+            const text = document.getElementById('network-status-text');
+            if (navigator.onLine) {
+                dot.className = "w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]";
+                text.innerText = "連線同步中";
+            } else {
+                dot.className = "w-2 h-2 rounded-full bg-slate-400";
+                text.innerText = "離線作業中";
+            }
+        }
+
+        // --- 核心邏輯 ---
+        window.calculateCurrentWeek = function(targetDateStr) {
+            const anchor = new Date(window.BATCH_ANCHOR_DATE);
+            const target = new Date(targetDateStr);
+            const diffTime = target.getTime() - anchor.getTime();
+            const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+            const dayInCycle = ((diffDays % 21) + 21) % 21;
+            return { weekNum: Math.floor(dayInCycle / 7), dayOfWeek: target.getDay() };
+        }
+
+        function normalizeRoles(roleData) {
+            if (Array.isArray(roleData)) return roleData;
+            if (typeof roleData === 'string' && roleData.trim() !== "") return roleData.split(',').map(r => r.trim());
+            return [];
+        }
+
+        async function loadAllData() {
             const { doc, onSnapshot } = window.firebaseModules;
-            if (window.unsubscribe) window.unsubscribe();
+            
+            // 優先從本地 IndexedDB 嘗試恢復緩存 (讓冷啟動更快)
+            const cachedConfig = await localDB.get("master_config");
+            if (cachedConfig) {
+                masterTasks = cachedConfig.tasks || [];
+                staffMapping = cachedConfig.staff || {};
+                sopLibraryData = cachedConfig.library || {};
+                renderSystem();
+                document.getElementById('local-status-dot').className = "w-2 h-2 rounded-full bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.5)]";
+            }
 
-            const docRef = doc(window.db, 'artifacts', window.appId, 'public', 'data', 'main', 'master_data');
-            window.unsubscribe = onSnapshot(docRef, (docSnap) => {
-                if (docSnap.exists()) {
-                    window.wbsData = docSnap.data().modules;
-                    updateUI("雲端即時連線中");
-                    
-                    const sopModal = document.getElementById('sop-modal');
-                    if (sopModal && !sopModal.classList.contains('hidden')) {
-                        const mIdx = window.currentMIdx;
-                        const tIdx = window.currentTIdx;
-                        if (mIdx !== undefined && tIdx !== undefined) renderSteps(mIdx, tIdx);
-                    }
-                } else {
-                    showConfirmModal("雲端尚未初始化，是否立即同步試算表？", window.syncFromGSheets);
+            // 監聽雲端即時更新
+            onSnapshot(doc(window.db, 'artifacts', 'yl-command', 'public', 'data', 'master_tasks', 'config'), async (snap) => {
+                if (snap.exists()) {
+                    const data = snap.data();
+                    masterTasks = data.tasks || [];
+                    staffMapping = data.staff || {}; 
+                    sopLibraryData = data.library || {};
+                    // 更新本地備份
+                    await localDB.save("master_config", data);
+                    document.getElementById('local-status-dot').className = "w-2 h-2 rounded-full bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.5)]";
+                    renderSystem();
+                } else if (!cachedConfig) {
+                    renderEmptyState();
                 }
-            }, (error) => {
-                console.error("Read Error:", error);
-                if (error.code === 'permission-denied') showToast("讀取權限不足", "error");
             });
-        };
+        }
 
-        window.requestGSheetSync = function() {
-            showConfirmModal(
-                "⚠️ 確定要執行同步嗎？\n這將會根據 Google 試算表的最新內容更新全牧場裝置的看板資訊。",
-                window.syncFromGSheets
-            );
-        };
+        window.loadDailyStatus = function(dateStr) {
+            const { doc, onSnapshot } = window.firebaseModules;
+            if (window.unsubscribeDaily) window.unsubscribeDaily();
+            const docRef = doc(window.db, 'artifacts', 'yl-command', 'public', 'data', 'daily_status', dateStr);
+            window.unsubscribeDaily = onSnapshot(docRef, (snap) => {
+                dailyProgress = snap.exists() ? snap.data() : {};
+                renderSystem();
+            });
+        }
 
-        window.syncFromGSheets = async function() {
-            closeConfirmModal();
-            const syncIcon = document.getElementById('gsync-icon');
-            if (syncIcon) syncIcon.classList.add('animate-spin');
-            updateStatus("正在抓取試算表...", "yellow");
-
-            try {
-                const moduleDefinitions = [
-                    { id: "1.0", title: "繁殖與女豬管理", icon: "heart", color: "text-rose-600", bgColor: "bg-rose-50" },
-                    { id: "2.0", title: "分娩與哺乳模組", icon: "baby", color: "text-indigo-600", bgColor: "bg-indigo-50" },
-                    { id: "3.0", title: "育成肥育與污水", icon: "droplets", color: "text-emerald-600", bgColor: "bg-emerald-50" },
-                    { id: "4.0", title: "生物安全與藥政", icon: "shield-check", color: "text-violet-600", bgColor: "bg-violet-50" },
-                    { id: "5.0", title: "供應鏈與飼料", icon: "truck", color: "text-amber-600", bgColor: "bg-amber-50" },
-                    { id: "6.0", title: "動力設備與維護", icon: "wrench", color: "text-slate-600", bgColor: "bg-slate-100" }
-                ];
-
-                const results = await Promise.all(moduleDefinitions.map(async (def) => {
-                    const sheetName = `${def.id} ${def.title}`;
-                    const url = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}`;
-                    const response = await fetch(url);
-                    if (!response.ok) throw new Error("GSheet Fetch Failed");
-                    const csvText = await response.text();
-                    return { ...def, tasks: parseCSV(csvText) };
-                }));
-
-                window.wbsData = results;
-                await saveToCloud();
-                showToast("同步成功：已更新雲端數據庫", "success");
-            } catch (error) {
-                showToast("同步失敗，請檢查網路或連結權限", "error");
-            } finally {
-                if (syncIcon) syncIcon.classList.remove('animate-spin');
-            }
-        };
-
-        async function saveToCloud() {
-            if (!window.currentUser || !window.db) return;
+        window.toggleTask = async function(taskId) {
             const { doc, setDoc } = window.firebaseModules;
-            const docRef = doc(window.db, 'artifacts', window.appId, 'public', 'data', 'main', 'master_data');
-            await setDoc(docRef, { 
-                modules: window.wbsData, 
-                lastUpdated: new Date().toISOString(),
-                updatedBy: window.currentUser.uid
-            });
-        }
+            dailyProgress[taskId] = !dailyProgress[taskId];
+            const docRef = doc(window.db, 'artifacts', 'yl-command', 'public', 'data', 'daily_status', window.selectedDate);
+            // 此處即使離線也會先存在 Firestore 本地快取，連線後自動同步
+            await setDoc(docRef, dailyProgress);
+        };
 
-        function parseCSV(csv) {
-            const rows = csv.split('\n').map(r => r.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.replace(/^"|"$/g, '').trim()));
-            const tasks = []; let cur = null;
-            rows.slice(1).forEach(row => {
-                if (!row[0] && !row[2]) return;
-                if (row[0]) { cur = { name: row[0], steps: [] }; tasks.push(cur); }
-                if (cur && row[2]) cur.steps.push(row[2]);
-            });
-            return tasks;
-        }
+        window.requestSync = async function() {
+            const btn = document.getElementById('sync-btn');
+            btn.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> 正在跨分頁同步...`;
+            lucide.createIcons();
+            try {
+                const fetchCSV = async (tab) => {
+                    const url = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet=${tab}`;
+                    const res = await fetch(url);
+                    const text = await res.text();
+                    return text.split('\n').map(r => r.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.replace(/^"|"$/g, '').trim()));
+                };
+                const [wbsRows, staffRows, libRows] = await Promise.all([fetchCSV(TAB_WBS), fetchCSV(TAB_STAFF), fetchCSV(TAB_LIBRARY)]);
+                const newTasks = wbsRows.slice(1).map((row, index) => ({
+                    id: `id_${row[3] || index}`, week: parseInt(row[0]), day: parseInt(row[1]),  
+                    role: (row[2] || "").split(',').map(r => r.trim()), 
+                    jobId: row[3], workName: row[4], jobTitle: row[5], moduleId: row[6]
+                })).filter(t => !isNaN(t.week) && t.workName);
+                const newStaffMap = {};
+                staffRows.slice(1).forEach(row => { if (row[0] && row[1]) newStaffMap[row[0]] = row[1]; });
+                const newLibrary = {};
+                libRows.slice(1).forEach(row => {
+                    const workKey = row[2]; const stepContent = row[4];
+                    if (workKey && stepContent) { if (!newLibrary[workKey]) newLibrary[workKey] = []; newLibrary[workKey].push(stepContent); }
+                });
 
-        function updateUI(status) {
-            updateStatus(status, "green");
-            const syncTime = document.getElementById('last-sync-time');
-            if (syncTime) syncTime.innerText = new Date().toLocaleTimeString();
-            updateStats();
-            renderGrid();
-            if (window.lucide) lucide.createIcons();
-        }
-
-        function updateStatus(text, color) {
-            const dot = document.getElementById('sync-status-dot');
-            const textEl = document.getElementById('sync-status-text');
-            if (dot) dot.className = `w-2 h-2 rounded-full bg-${color}-500`;
-            if (textEl) textEl.innerText = text;
-        }
-
-        window.onload = () => {
-            if (sessionStorage.getItem('is_authenticated') === 'true') {
-                document.getElementById('auth-overlay')?.classList.add('hidden');
-                initFirebase();
+                const syncData = { tasks: newTasks, staff: newStaffMap, library: newLibrary, lastSync: new Date().toISOString() };
+                const { doc, setDoc } = window.firebaseModules;
+                await setDoc(doc(window.db, 'artifacts', 'yl-command', 'public', 'data', 'master_tasks', 'config'), syncData);
+                await localDB.save("master_config", syncData); // 備份至 IndexedDB
+                alert("✅ 雲端與本地同步成功！");
+            } catch (error) { alert("❌ 同步失敗：請檢查網路或試算表設定。"); } finally {
+                btn.innerHTML = `<i data-lucide="refresh-cw" class="w-4 h-4"></i> 同步數據庫`;
+                lucide.createIcons();
             }
-            if (window.lucide) lucide.createIcons();
-            document.getElementById('passcode-input')?.addEventListener('keypress', (e) => { if (e.key === 'Enter') window.checkPasscode(); });
+        };
+
+        // --- UI 控制 ---
+        window.switchView = function(mode) {
+            window.viewMode = mode;
+            ['btn-daily', 'btn-weekly', 'btn-all'].forEach(id => {
+                const btn = document.getElementById(id);
+                if (btn) btn.className = (id === `btn-${mode}`) ? 'px-6 py-3 rounded-2xl text-sm font-black bg-indigo-600 text-white shadow-xl transition-all' : 'px-6 py-3 rounded-2xl text-sm font-black text-slate-400 hover:text-slate-600 transition-all';
+            });
+            renderSystem();
+        };
+
+        window.handleDateChange = (e) => { window.selectedDate = e.target.value; window.loadDailyStatus(window.selectedDate); };
+        window.goToday = () => { const t = new Date().toISOString().split('T')[0]; document.getElementById('date-picker').value = t; window.selectedDate = t; window.loadDailyStatus(t); };
+
+        function renderSystem() {
+            const { weekNum, dayOfWeek } = window.calculateCurrentWeek(window.selectedDate);
+            const weekInfo = WEEK_LOGIC[weekNum];
+            if (document.getElementById('batch-card')) document.getElementById('batch-card').className = `glass-card p-10 rounded-[48px] shadow-sm border border-slate-100 animate-fade ${weekInfo.class}`;
+            if (document.getElementById('week-title')) document.getElementById('week-title').innerText = weekInfo.name;
+            if (document.getElementById('week-desc')) document.getElementById('week-desc').innerText = weekInfo.desc;
+            if (document.getElementById('batch-type-label')) document.getElementById('batch-type-label').innerText = weekInfo.name.split(' ')[0];
+
+            const sections = document.getElementById('staff-sections');
+            if (!sections) return;
+            sections.innerHTML = '';
+
+            if (window.viewMode === 'daily') renderDailyView(weekNum, dayOfWeek, sections);
+            else if (window.viewMode === 'weekly') renderWeeklyView(weekNum, sections);
+            else renderAllWBSView(sections);
+            lucide.createIcons();
+            updateOnlineStatus();
+        }
+
+        function renderDailyView(weekNum, dayOfWeek, container) {
+            let total = 0, done = 0;
+            STAFF_ROLES.forEach(role => {
+                const roleTasks = masterTasks.filter(t => normalizeRoles(t.role).includes(role.id) && t.week === weekNum && (t.day === dayOfWeek || (t.day === 7 && dayOfWeek === 0)));
+                if (roleTasks.length === 0) return;
+                const actualName = staffMapping[role.id] ? ` (${staffMapping[role.id]})` : "";
+                const card = document.createElement('div');
+                card.className = "glass-card p-8 rounded-[40px] border border-slate-100 shadow-sm animate-fade flex flex-col";
+                let html = `<div class="flex items-center gap-4 mb-8"><div class="p-3.5 rounded-2xl ${role.bgColor} ${role.color} shadow-inner"><i data-lucide="${role.icon}" class="w-7 h-7"></i></div><div><h3 class="text-xl font-black text-slate-800 leading-tight">${role.name}</h3><p class="text-[11px] font-bold text-slate-400 uppercase tracking-widest">${actualName}</p></div></div><div class="space-y-4">`;
+                roleTasks.forEach(task => {
+                    total++; const isDone = dailyProgress[task.id] || false; if (isDone) done++;
+                    const modInfo = MODULE_MAP[task.moduleId] || { title: "", color: "text-slate-400" };
+                    const roles = normalizeRoles(task.role);
+                    let staffNames = roles.map(rid => staffMapping[rid] || rid).join(' & ');
+                    html += `
+                        <div class="flex flex-col gap-1 p-6 rounded-[32px] transition-all ${isDone ? 'bg-emerald-50 border-emerald-100 shadow-inner' : 'bg-slate-50 border-transparent hover:bg-white hover:shadow-xl'} border relative group">
+                            <div class="flex justify-between items-start mb-2">
+                                <div class="flex flex-col gap-1">
+                                    <span class="text-[9px] font-black uppercase tracking-tighter ${modInfo.color}">${task.moduleId ? `[MOD ${task.moduleId}] ${modInfo.title}` : '一般任務'}</span>
+                                    <span class="text-[8px] font-black text-indigo-500 bg-indigo-50 px-1.5 py-0.5 rounded-md w-fit flex items-center gap-1 uppercase">負責人: ${staffNames}</span>
+                                </div>
+                                <button onclick="window.toggleTask('${task.id}')" class="w-8 h-8 rounded-full border-2 flex items-center justify-center transition-all ${isDone ? 'bg-emerald-500 border-emerald-500 text-white' : 'border-slate-300 group-hover:border-indigo-500'}">${isDone ? '<i data-lucide="check" class="w-4 h-4"></i>' : ''}</button>
+                            </div>
+                            <div class="cursor-pointer" onclick="window.openSOPDetail('${task.moduleId}', '${task.workName}')">
+                                <h4 class="font-black text-slate-900 text-base mb-1 tracking-tight">${task.workName}</h4>
+                                <div class="flex items-center gap-2"><p class="text-sm font-bold text-slate-500 leading-snug flex-1">${task.jobTitle}</p><i data-lucide="arrow-right-circle" class="w-4 h-4 text-slate-200 group-hover:text-indigo-500 transition-colors"></i></div>
+                            </div>
+                        </div>`;
+                });
+                card.innerHTML = html + `</div>`;
+                container.appendChild(card);
+            });
+            if (document.getElementById('task-ratio')) document.getElementById('task-ratio').innerText = `${done}/${total}`;
+            if (document.getElementById('overall-progress')) document.getElementById('overall-progress').style.width = `${total > 0 ? (done/total)*100 : 0}%`;
+        }
+
+        function renderWeeklyView(weekNum, container) {
+            container.className = "grid grid-cols-1 gap-8"; 
+            for (let d = 1; d <= 7; d++) {
+                const tasks = masterTasks.filter(t => t.week === weekNum && t.day === d);
+                if (tasks.length === 0) continue;
+                const dayBlock = document.createElement('div');
+                dayBlock.className = "glass-card p-10 rounded-[48px] border border-slate-100 shadow-sm animate-fade";
+                let dayHtml = `<div class="flex items-center gap-5 mb-8"><div class="w-16 h-16 rounded-[24px] bg-slate-900 text-white flex flex-col items-center justify-center shadow-lg"><span class="text-xs font-black uppercase tracking-widest">${DAY_NAMES[d % 7]}</span></div><h3 class="text-2xl font-black text-slate-800 tracking-tighter">當日流程</h3></div><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">`;
+                tasks.forEach(task => {
+                    let staffLabels = normalizeRoles(task.role).map(rid => {
+                        const r = STAFF_ROLES.find(sr => sr.id === rid);
+                        return `<span class="text-[9px] font-black px-2 py-1 rounded-lg ${r?.bgColor || 'bg-slate-100'} ${r?.color || 'text-slate-400'} uppercase mr-1 inline-block mb-1">${staffMapping[rid] || r?.name || rid}</span>`;
+                    }).join('');
+                    dayHtml += `<div class="p-6 rounded-[32px] bg-white border border-slate-100 shadow-sm hover:shadow-md transition-all cursor-pointer" onclick="window.openSOPDetail('${task.moduleId}', '${task.workName}')"><div class="flex flex-wrap gap-1.5 mb-4">${staffLabels}</div><p class="text-[10px] font-black text-indigo-500 mb-1 tracking-widest uppercase">ID ${task.jobId}</p><h4 class="font-black text-slate-800 text-base mb-1">${task.workName}</h4><p class="text-xs font-bold text-slate-400 leading-relaxed">${task.jobTitle}</p></div>`;
+                });
+                dayBlock.innerHTML = dayHtml + `</div>`;
+                container.appendChild(dayBlock);
+            }
+        }
+
+        function renderAllWBSView(container) {
+            container.className = "grid grid-cols-1 gap-16";
+            WEEK_LOGIC.forEach(weekInfo => {
+                const sec = document.createElement('div');
+                let html = `<div class="flex items-center gap-6 border-b-4 ${weekInfo.class.replace('border-top', 'border-bottom')} pb-6 mb-10"><h2 class="text-4xl font-black text-slate-900">${weekInfo.name}</h2></div><div class="space-y-12">`;
+                for (let d = 1; d <= 7; d++) {
+                    const tasks = masterTasks.filter(t => t.week === weekInfo.id && t.day === d);
+                    if (tasks.length === 0) continue;
+                    html += `<div class="flex flex-col lg:flex-row gap-10"><div class="lg:w-32 font-black text-2xl text-slate-200 uppercase tracking-widest">${DAY_NAMES[d % 7]}</div><div class="flex-1 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">`;
+                    tasks.forEach(t => {
+                        let names = normalizeRoles(t.role).map(rid => staffMapping[rid] || rid).join(', ');
+                        html += `<div class="p-6 rounded-[32px] bg-white border border-slate-100 shadow-sm cursor-pointer hover:shadow-md transition-all" onclick="window.openSOPDetail('${t.moduleId}', '${t.workName}')"><span class="text-[8px] font-black text-indigo-500 block mb-2 uppercase">${names}</span><h4 class="font-black text-slate-800 text-sm mb-1">${t.workName}</h4><p class="text-[10px] font-bold text-slate-400">${t.jobTitle}</p></div>`;
+                    });
+                    html += `</div></div>`;
+                }
+                sec.innerHTML = html + `</div>`;
+                container.appendChild(sec);
+            });
+        }
+
+        window.openSOPDetail = function(moduleId, workName) {
+            const steps = sopLibraryData[workName];
+            const moduleName = MODULE_MAP[moduleId]?.title || "標準作業規範";
+            document.getElementById('sop-modal-title').innerText = workName;
+            document.getElementById('sop-modal-tag').innerText = `MOD ${moduleId} | ${moduleName}`;
+            const stepsContainer = document.getElementById('sop-modal-steps');
+            if (steps && steps.length > 0) {
+                stepsContainer.innerHTML = steps.map((s, i) => `<div class="flex gap-6 p-6 bg-slate-50 rounded-[28px] mb-4 hover:bg-white transition-all group shadow-sm"><div class="w-10 h-10 flex-shrink-0 bg-white rounded-xl flex items-center justify-center font-black text-sm text-indigo-600 shadow-sm group-hover:bg-indigo-600 group-hover:text-white transition-colors">${i+1}</div><div class="flex-1 pt-1"><p class="text-base font-bold text-slate-700 leading-relaxed">${s}</p></div></div>`).join('');
+            } else {
+                stepsContainer.innerHTML = `<div class="py-20 text-center text-slate-300 font-bold"><p>尚未定義詳細步驟。</p></div>`;
+            }
+            document.getElementById('sop-modal-overlay').classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
+            lucide.createIcons();
+        };
+
+        window.closeSOPModal = () => { document.getElementById('sop-modal-overlay').classList.add('hidden'); document.body.style.overflow = ''; };
+        window.checkPasscode = () => { if (document.getElementById('passcode-input').value === MASTER_PASSCODE) { sessionStorage.setItem('yl_auth', 'true'); document.getElementById('auth-overlay').classList.add('hidden'); startSystem(); } };
+        function startSystem() { onAuthStateChanged(auth, (u) => { if (u) { loadAllData(); window.loadDailyStatus(window.selectedDate); } else { signInAnonymously(auth); } }); }
+        
+        window.onload = () => {
+            if (sessionStorage.getItem('yl_auth') === 'true') { document.getElementById('auth-overlay').classList.add('hidden'); startSystem(); }
+            document.getElementById('date-picker').value = window.selectedDate;
+            updateOnlineStatus();
         };
     </script>
 
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700;900&display=swap');
         body { font-family: 'Noto Sans TC', sans-serif; background-color: #f8fafc; color: #1e293b; -webkit-tap-highlight-color: transparent; }
-        .glass-nav { background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(20px); border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
-        .gem-card { transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); background: white; border: 1px solid #f1f5f9; cursor: pointer; }
-        .gem-card:hover { transform: translateY(-8px); box-shadow: 0 25px 50px -12px rgba(99, 102, 241, 0.12); border-color: #e2e8f0; }
-        .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .batch-breeding { border-top: 14px solid #3b82f6; } 
+        .batch-farrowing { border-top: 14px solid #10b981; } 
+        .batch-weaning { border-top: 14px solid #f59e0b; }   
+        .batch-breeding.border-bottom { border-bottom: 10px solid #3b82f6; border-top: none; }
+        .batch-farrowing.border-bottom { border-bottom: 10px solid #10b981; border-top: none; }
+        .batch-weaning.border-bottom { border-bottom: 10px solid #f59e0b; border-top: none; }
+        .glass-card { background: rgba(255, 255, 255, 0.98); backdrop-filter: blur(10px); }
+        .animate-fade { animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
-<body class="flex flex-col min-h-screen">
+<body class="min-h-screen pb-24">
 
-    <!-- 通行碼遮罩 -->
-    <div id="auth-overlay" class="fixed inset-0 z-[1000] bg-slate-900 flex items-center justify-center p-6">
-        <div class="max-w-md w-full bg-white rounded-[40px] p-10 shadow-2xl text-center">
-            <div class="inline-flex p-5 rounded-3xl bg-indigo-50 text-indigo-600 mb-6"><i data-lucide="shield-check" class="w-10 h-10"></i></div>
-            <h2 class="text-2xl font-black text-slate-900 mb-2">永隆牧場數位中心</h2>
-            <p class="text-slate-400 text-sm mb-8">發佈中心：請輸入通行碼</p>
-            <input type="password" id="passcode-input" placeholder="Passcode" class="w-full px-6 py-4 bg-slate-100 rounded-2xl text-center text-xl font-bold mb-4 outline-none border border-transparent focus:border-indigo-300">
-            <p id="passcode-error" class="hidden text-rose-500 text-xs font-bold mb-4">驗證失敗</p>
-            <button onclick="window.checkPasscode()" class="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black text-lg">登入系統</button>
+    <!-- 驗證介面 (略) -->
+    <div id="auth-overlay" class="fixed inset-0 z-[2000] bg-slate-900 flex items-center justify-center p-6">
+        <div class="max-w-md w-full bg-white rounded-[48px] p-12 shadow-2xl text-center">
+            <h2 class="text-3xl font-black text-slate-900 mb-8 tracking-tighter">永隆智慧中心</h2>
+            <input type="password" id="passcode-input" placeholder="PASSCODE" class="w-full px-6 py-5 bg-slate-50 rounded-2xl text-center text-3xl font-black mb-6 outline-none border-2 border-transparent focus:border-indigo-500 focus:bg-white transition-all tracking-[0.3em]">
+            <button onclick="window.checkPasscode()" class="w-full py-5 bg-indigo-600 text-white rounded-2xl font-black text-lg active:scale-95 transition-all shadow-xl shadow-indigo-100">啟動離線 APP</button>
         </div>
     </div>
 
-    <!-- 同步確認視窗 -->
-    <div id="confirm-modal" class="fixed inset-0 z-[1100] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 hidden">
-        <div class="max-w-lg w-full bg-white rounded-[40px] p-10 shadow-2xl text-center animate-fade-in">
-            <div class="inline-flex p-5 rounded-3xl bg-blue-50 text-blue-600 mb-6"><i data-lucide="refresh-cw" class="w-10 h-10"></i></div>
-            <h2 class="text-2xl font-black text-slate-900 mb-4">同步雲端數據庫</h2>
-            <p id="confirm-message" class="text-slate-500 leading-relaxed mb-10 whitespace-pre-line"></p>
-            <div class="flex gap-4">
-                <button onclick="window.closeConfirmModal()" class="flex-1 py-4 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200">取消</button>
-                <button onclick="window.executeConfirm()" class="flex-1 py-4 bg-indigo-600 text-white rounded-2xl font-bold shadow-lg shadow-indigo-100 hover:bg-indigo-700">確定同步</button>
-            </div>
-        </div>
-    </div>
-
-    <header class="glass-nav sticky top-0 z-[100] px-6 py-4 shadow-sm">
-        <div class="max-w-[1500px] mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
-            <div class="flex items-center gap-4">
-                <div class="bg-indigo-600 p-3 rounded-2xl text-white shadow-lg"><i data-lucide="book-open" class="w-7 h-7"></i></div>
+    <header class="sticky top-0 z-50 glass-card border-b border-slate-200/60 px-6 py-6">
+        <div class="max-w-[1600px] mx-auto flex flex-col xl:flex-row items-center justify-between gap-6">
+            <div class="flex items-center gap-6">
+                <div class="bg-slate-900 p-4 rounded-[24px] shadow-2xl"><i data-lucide="zap" class="w-8 h-8 text-white"></i></div>
                 <div>
-                    <h1 class="text-2xl font-black text-slate-900 tracking-tighter">Gem 養豬專家</h1>
-                    <div class="flex items-center gap-2">
-                        <span id="sync-status-dot" class="w-2 h-2 bg-slate-300 rounded-full"></span>
-                        <p id="sync-status-text" class="text-[11px] text-slate-400 font-bold uppercase tracking-widest">系統就緒</p>
+                    <h1 class="text-2xl font-black text-slate-900 tracking-tighter mb-1 leading-none">永隆指揮中心</h1>
+                    <div class="flex items-center gap-3">
+                        <div class="flex items-center gap-2 bg-slate-100 px-3 py-1 rounded-full border border-slate-200">
+                            <span id="network-status-dot" class="w-2 h-2 rounded-full bg-emerald-500"></span>
+                            <span id="network-status-text" class="text-[10px] font-black text-slate-500 uppercase tracking-widest">連線同步中</span>
+                        </div>
+                        <div class="flex items-center gap-2 bg-indigo-50 px-3 py-1 rounded-full border border-indigo-100">
+                            <span id="local-status-dot" class="w-2 h-2 rounded-full bg-slate-300"></span>
+                            <span class="text-[10px] font-black text-indigo-500 uppercase tracking-widest">本地持久化</span>
+                        </div>
+                        <input type="date" id="date-picker" onchange="window.handleDateChange(event)" class="text-[11px] font-black text-indigo-600 bg-transparent border-none outline-none cursor-pointer">
                     </div>
                 </div>
             </div>
             
-            <div class="flex-1 max-w-xl w-full">
-                <div class="relative">
-                    <i data-lucide="search" class="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400"></i>
-                    <input type="text" id="searchInput" oninput="window.handleSearch()" placeholder="快速關鍵字搜尋..." class="w-full pl-12 pr-4 py-3 bg-slate-100/80 rounded-2xl outline-none focus:bg-white transition-all shadow-inner">
-                </div>
+            <div class="flex items-center gap-1.5 bg-slate-100 p-2 rounded-3xl shadow-inner">
+                <button id="btn-daily" onclick="window.switchView('daily')" class="px-6 py-3 rounded-2xl text-sm font-black bg-indigo-600 text-white shadow-xl transition-all">今日看板</button>
+                <button id="btn-weekly" onclick="window.switchView('weekly')" class="px-6 py-3 rounded-2xl text-sm font-black text-slate-400 hover:text-slate-600 transition-all">週看板</button>
+                <button id="btn-all" onclick="window.switchView('all')" class="px-6 py-3 rounded-2xl text-sm font-black text-slate-400 hover:text-slate-600 transition-all">全案總覽</button>
             </div>
 
-            <button onclick="window.requestGSheetSync()" class="flex items-center gap-2 px-6 py-3 rounded-2xl bg-indigo-600 text-white font-bold text-sm shadow-xl shadow-indigo-100 hover:bg-indigo-700 transition-all group">
-                <i data-lucide="refresh-cw" id="gsync-icon" class="w-4 h-4"></i>
-                <span>更新發佈內容</span>
-            </button>
+            <div class="flex items-center gap-4">
+                <button onclick="window.goToday()" class="text-xs bg-white border border-slate-200 px-6 py-3 rounded-2xl hover:bg-indigo-600 hover:text-white transition-all shadow-sm font-black tracking-widest">回今日</button>
+                <button id="sync-btn" onclick="window.requestSync()" class="flex items-center gap-2 px-6 py-3 rounded-2xl bg-slate-900 text-white font-black text-sm shadow-xl transition-all"><i data-lucide="refresh-cw" class="w-4 h-4"></i>同步數據庫</button>
+            </div>
         </div>
     </header>
 
-    <main class="flex-1 max-w-[1500px] w-full mx-auto px-6 py-8">
-        <!-- 狀態看板 -->
-        <section class="grid grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
-            <div class="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm">
-                <p class="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3">當前 UID</p>
-                <p id="user-display" class="text-xs font-mono text-slate-400 truncate">Waiting...</p>
+    <main class="max-w-[1600px] mx-auto px-6 py-10">
+        <section class="grid grid-cols-1 md:grid-cols-2 gap-8 mb-12">
+            <div id="batch-card" class="glass-card p-12 rounded-[56px] shadow-sm border border-slate-100 animate-fade">
+                <p class="text-[11px] font-black text-slate-400 uppercase mb-4 tracking-widest">週期狀態</p>
+                <h2 id="week-title" class="text-5xl font-black text-slate-900 mb-2 tracking-tighter">-- 週</h2>
+                <p id="week-desc" class="text-base text-slate-500 font-medium leading-relaxed">正在計算中...</p>
             </div>
-            <div class="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm">
-                <p class="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3">SOP 總量</p>
-                <h2 id="stats-sop-count" class="text-4xl font-black text-slate-900">--</h2>
-            </div>
-            <div class="bg-emerald-600 p-6 rounded-[32px] shadow-xl text-white">
-                <p class="text-emerald-200 text-[11px] font-black uppercase tracking-widest mb-3">運行狀態</p>
-                <div class="flex items-center gap-3"><i data-lucide="check-circle" class="w-6 h-6"></i><h2 class="text-xl font-bold italic">唯讀發佈中</h2></div>
-            </div>
-            <div class="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm">
-                <p class="text-[11px] font-black text-slate-400 uppercase tracking-widest mb-3">最後異動</p>
-                <h2 id="last-sync-time" class="text-2xl font-bold tabular-nums">--:--:--</h2>
+            <div class="glass-card p-12 rounded-[56px] shadow-sm border border-slate-100 animate-fade">
+                <p class="text-[11px] font-black text-slate-400 uppercase mb-4 tracking-widest">任務進度統計</p>
+                <div class="flex items-end gap-5">
+                    <h2 id="task-ratio" class="text-6xl font-black text-slate-900 tabular-nums">0/0</h2>
+                    <p class="text-lg font-black text-slate-400 mb-1 uppercase">COMPLETED</p>
+                </div>
+                <div class="w-full h-3 bg-slate-100 rounded-full mt-8 overflow-hidden shadow-inner"><div id="overall-progress" class="h-full bg-indigo-600 transition-all duration-1000 ease-out" style="width: 0%"></div></div>
             </div>
         </section>
-        
-        <!-- SOP 格狀布局 -->
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8" id="main-grid"></div>
+        <div id="staff-sections" class="grid grid-cols-1 lg:grid-cols-2 gap-12"></div>
     </main>
 
-    <!-- SOP 詳情 (唯讀版) -->
-    <div id="sop-modal" class="fixed inset-0 z-[200] flex items-center justify-center p-4 md:p-8 hidden">
-        <div class="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onclick="window.closeSOP()"></div>
-        <div class="relative bg-white w-full max-w-4xl rounded-[40px] shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-fade-in">
-            <div class="p-8 border-b border-slate-100 flex justify-between items-start bg-slate-50/50">
-                <div class="flex items-center gap-6">
-                    <div id="modal-icon-container" class="w-16 h-16 rounded-[24px] flex items-center justify-center shadow-inner">
-                        <i id="modal-icon" data-lucide="book-open" class="w-8 h-8"></i>
-                    </div>
-                    <div>
-                        <div class="flex items-center gap-2 mb-1.5">
-                            <span id="modal-tag" class="text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest"></span>
-                            <span class="text-[10px] font-bold text-slate-400">YONG LONG FARM SOP</span>
-                        </div>
-                        <h3 id="modal-title" class="text-3xl font-black text-slate-900 tracking-tight leading-tight"></h3>
-                    </div>
+    <div id="sop-modal-overlay" class="fixed inset-0 z-[3000] bg-slate-900/80 backdrop-blur-md flex items-center justify-center p-4 md:p-8 hidden">
+        <div class="bg-white w-full max-w-3xl rounded-[56px] shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-fade">
+            <div class="p-10 border-b border-slate-100 flex justify-between items-start bg-slate-50/50">
+                <div>
+                    <span id="sop-modal-tag" class="text-[10px] font-black px-3 py-1 rounded-full bg-indigo-100 text-indigo-700 uppercase mb-4 block w-fit tracking-widest"></span>
+                    <h3 id="sop-modal-title" class="text-4xl font-black text-slate-900 leading-tight"></h3>
                 </div>
-                <button onclick="window.closeSOP()" class="p-3 text-slate-400 hover:text-rose-500 transition-colors"><i data-lucide="x" class="w-8 h-8"></i></button>
+                <button onclick="window.closeSOPModal()" class="p-4 text-slate-300 hover:text-rose-500 transition-all"><i data-lucide="x" class="w-8 h-8"></i></button>
             </div>
-            
-            <div class="p-8 md:p-12 overflow-y-auto bg-white flex-1" id="sop-steps-container"></div>
-            
-            <div class="p-6 bg-slate-50 border-t border-slate-100 flex justify-between items-center">
-                <p class="text-[11px] text-slate-400 font-medium italic">※ 此內容由雲端發佈中心同步，不可於此處修改。</p>
-                <button onclick="window.closeSOP()" class="px-12 py-4 bg-slate-900 text-white rounded-2xl font-bold shadow-lg shadow-slate-200 hover:bg-slate-800 active:scale-95 transition-all">完成檢閱</button>
+            <div id="sop-modal-steps" class="p-10 overflow-y-auto space-y-2"></div>
+            <div class="p-8 bg-white border-t border-slate-50 flex justify-center">
+                <button onclick="window.closeSOPModal()" class="px-16 py-5 bg-slate-900 text-white rounded-[24px] font-black text-lg active:scale-95 transition-all shadow-2xl">了解，我會按步驟執行</button>
             </div>
         </div>
     </div>
-
-    <div id="toast-container" class="fixed bottom-8 right-8 z-[300] space-y-3"></div>
-
-    <script>
-        function renderGrid() {
-            const grid = document.getElementById('main-grid');
-            if (!grid) return;
-            const filtered = (window.wbsData || []).filter(m => 
-                m.title.includes(window.currentSearch) || m.id.includes(window.currentSearch) ||
-                (m.tasks && m.tasks.some(t => t.name.includes(window.currentSearch)))
-            );
-
-            grid.innerHTML = filtered.map((m) => `
-                <div class="gem-card rounded-[40px] p-8 flex flex-col animate-fade-in shadow-sm">
-                    <div class="flex items-center gap-4 mb-8">
-                        <div class="p-4 rounded-2xl ${m.bgColor} ${m.color} shadow-inner"><i data-lucide="${m.icon}" class="w-6 h-6"></i></div>
-                        <div>
-                            <p class="text-[10px] font-black text-slate-300 tracking-widest uppercase">WBS ${m.id}</p>
-                            <h3 class="text-xl font-bold text-slate-800 tracking-tight">${m.title}</h3>
-                        </div>
-                    </div>
-                    <div class="space-y-2 flex-1">
-                        ${m.tasks ? m.tasks.map((t, tIdx) => {
-                            const originalModuleIdx = window.wbsData.findIndex(orig => orig.id === m.id);
-                            return `
-                                <button onclick="window.openSOP(${originalModuleIdx}, ${tIdx})" class="w-full flex items-center justify-between p-4 rounded-xl bg-slate-50 border border-transparent hover:bg-slate-900 hover:text-white transition-all text-left group">
-                                    <span class="text-sm font-bold truncate pr-4">${t.name}</span>
-                                    <i data-lucide="chevron-right" class="w-4 h-4 text-slate-300 group-hover:translate-x-1"></i>
-                                </button>
-                            `;
-                        }).join('') : ''}
-                    </div>
-                </div>
-            `).join('');
-            if (window.lucide) lucide.createIcons();
-        }
-
-        window.openSOP = (mIdx, tIdx) => {
-            window.currentMIdx = mIdx;
-            window.currentTIdx = tIdx;
-            renderSteps(mIdx, tIdx);
-            document.getElementById('sop-modal')?.classList.remove('hidden');
-            document.body.style.overflow = 'hidden';
-        };
-
-        function renderSteps(mIdx, tIdx) {
-            const module = window.wbsData[mIdx];
-            const task = module.tasks[tIdx];
-            if (!task) return;
-
-            document.getElementById('modal-title').innerText = task.name;
-            document.getElementById('modal-tag').innerText = `WBS ${module.id}`;
-            document.getElementById('modal-tag').className = `text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest ${module.bgColor} ${module.color}`;
-            document.getElementById('modal-icon-container').className = `w-16 h-16 rounded-[24px] shadow-inner flex items-center justify-center ${module.bgColor} ${module.color}`;
-            document.getElementById('modal-icon').setAttribute('data-lucide', module.icon);
-
-            const container = document.getElementById('sop-steps-container');
-            container.innerHTML = task.steps.map((s, i) => `
-                <div class="flex gap-6 items-start p-6 rounded-[28px] bg-slate-50 border border-slate-100 mb-4 hover:shadow-md transition-shadow">
-                    <div class="w-10 h-10 rounded-xl bg-white border border-slate-200 text-indigo-600 flex items-center justify-center font-black text-sm shadow-sm">${i + 1}</div>
-                    <p class="text-lg font-bold text-slate-700 leading-relaxed pt-1">${s}</p>
-                </div>
-            `).join('');
-            if (window.lucide) lucide.createIcons();
-        }
-
-        window.closeSOP = () => { document.getElementById('sop-modal').classList.add('hidden'); document.body.style.overflow = ''; };
-        window.handleSearch = () => { window.currentSearch = document.getElementById('searchInput').value; renderGrid(); };
-        window.showConfirmModal = function(msg, action) { document.getElementById('confirm-message').innerText = msg; document.getElementById('confirm-modal').classList.remove('hidden'); window.onConfirmAction = action; };
-        window.closeConfirmModal = function() { document.getElementById('confirm-modal').classList.add('hidden'); };
-        window.executeConfirm = function() { if (window.onConfirmAction) window.onConfirmAction(); };
-
-        function updateStats() {
-            let total = 0;
-            if (window.wbsData) window.wbsData.forEach(m => total += (m.tasks ? m.tasks.length : 0));
-            document.getElementById('stats-sop-count').innerText = total.toString().padStart(2, '0');
-        }
-
-        function showToast(msg, type) {
-            const container = document.getElementById('toast-container');
-            const toast = document.createElement('div');
-            toast.className = `px-6 py-4 rounded-2xl shadow-xl text-white font-bold flex items-center gap-3 animate-fade-in ${type === 'success' ? 'bg-emerald-600' : 'bg-rose-600'}`;
-            toast.innerHTML = `<i data-lucide="${type === 'success' ? 'check' : 'alert-circle'}" class="w-5 h-5"></i> ${msg}`;
-            container.appendChild(toast);
-            if (window.lucide) lucide.createIcons();
-            setTimeout(() => toast.remove(), 4000);
-        }
-    </script>
 </body>
 </html>
