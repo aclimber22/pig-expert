@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>永隆智慧農場 | IndexedDB 離線 APP</title>
+    <title>永隆智慧農場 | 單頁化管理 APP</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
@@ -11,7 +11,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, updateDoc, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         const firebaseConfig = {
             apiKey: "AIzaSyBQy2B-um_b2YfSJ4P53MlsvdfriQi36jo",
@@ -22,459 +22,449 @@
             appId: "1:7763114998:web:0a2215a56ee8cbd089a5d7"
         };
 
-        // --- 管理員與資料庫配置 ---
         const SPREADSHEET_ID = '1Q_xd4aNarphGl_7REybhYsp4mRNvCbWXeqDgts89w2k'; 
-        const TAB_WBS = 'Batch_WBS'; 
-        const TAB_STAFF = 'Staff_Config';
-        const TAB_LIBRARY = 'SOP_Library'; 
+        const TAB_MASTER = 'Work_Master'; 
+        const TAB_DEFS = 'Job_Definitions';
         const MASTER_PASSCODE = "YL2025";
         window.BATCH_ANCHOR_DATE = "2025-12-08"; 
 
-        // ==========================================
-        // 🛠️ [底層代碼：IndexedDB 管理器]
-        // ==========================================
-        class YL_LocalDB {
-            constructor() {
-                this.dbName = "YL_Farm_DB";
-                this.version = 1;
-                this.storeName = "WBS_Cache";
-                this.db = null;
-            }
-
-            // 初始化資料庫
-            init() {
-                return new Promise((resolve, reject) => {
-                    const request = indexedDB.open(this.dbName, this.version);
-                    request.onupgradeneeded = (e) => {
-                        const db = e.target.result;
-                        if (!db.objectStoreNames.contains(this.storeName)) {
-                            db.createObjectStore(this.storeName, { keyPath: "id" });
-                        }
-                    };
-                    request.onsuccess = (e) => {
-                        this.db = e.target.result;
-                        resolve(this.db);
-                    };
-                    request.onerror = (e) => reject(e.target.error);
-                });
-            }
-
-            // 儲存資料到本地
-            async save(key, data) {
-                if (!this.db) await this.init();
-                return new Promise((resolve, reject) => {
-                    const transaction = this.db.transaction([this.storeName], "readwrite");
-                    const store = transaction.objectStore(this.storeName);
-                    store.put({ id: key, content: data, timestamp: Date.now() });
-                    transaction.oncomplete = () => resolve(true);
-                    transaction.onerror = (e) => reject(e.target.error);
-                });
-            }
-
-            // 從本地讀取資料
-            async get(key) {
-                if (!this.db) await this.init();
-                return new Promise((resolve) => {
-                    const transaction = this.db.transaction([this.storeName], "readonly");
-                    const store = transaction.objectStore(this.storeName);
-                    const request = store.get(key);
-                    request.onsuccess = () => resolve(request.result ? request.result.content : null);
-                    request.onerror = () => resolve(null);
-                });
-            }
-        }
-
-        const localDB = new YL_LocalDB();
-        window.localDB = localDB;
-
-        // --- Firebase 初始化 ---
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
+        
         window.db = db;
-        window.firebaseModules = { doc, setDoc, updateDoc, onSnapshot, collection };
+        window.firebaseModules = { doc, setDoc, getDoc, collection, onSnapshot, addDoc, serverTimestamp };
 
-        // 啟動 Firebase 內建離線持久化 (基於 IndexedDB)
-        try {
-            await enableIndexedDbPersistence(db);
-            console.log("Firebase 離線同步已就緒");
-        } catch (err) {
-            console.warn("Firestore 持久化受限:", err.code);
+        let workSchedule = [];
+        let jobDefinitions = {}; 
+        let changeLogs = [];
+        let dailyProgress = {};
+        window.selectedDate = new Date().toISOString().split('T')[0];
+        window.viewMode = 'daily';
+        window.currentJobId = null;
+        window.currentJobTitle = null;
+        window.isEditMode = false;
+
+        // --- 核心邏輯：週期計算 ---
+        window.calculateCurrentWeek = function(dateStr) {
+            const anchor = new Date(window.BATCH_ANCHOR_DATE);
+            const target = new Date(dateStr);
+            const diffDays = Math.floor((target - anchor) / (1000 * 60 * 60 * 24));
+            const dayInCycle = ((diffDays % 21) + 21) % 21;
+            return { week: Math.floor(dayInCycle / 7), day: target.getDay() || 7 };
         }
 
-        let masterTasks = [];
-        let staffMapping = {}; 
-        let sopLibraryData = {}; 
-        let dailyProgress = {};
-        window.selectedDate = new Date().toISOString().split('T')[0]; 
-        window.viewMode = 'daily'; 
-        window.unsubscribeDaily = null;
-
-        const MODULE_MAP = {
-            "1.0": { title: "繁殖與女豬管理", color: "text-rose-600", bgColor: "bg-rose-50" },
-            "2.0": { title: "分娩與哺乳模組", color: "text-indigo-600", bgColor: "bg-indigo-50" },
-            "3.0": { title: "育成肥育與污水", color: "text-emerald-600", bgColor: "bg-emerald-50" },
-            "4.0": { title: "生物安全與藥政", color: "text-violet-600", bgColor: "bg-violet-50" },
-            "5.0": { title: "供應鏈與飼料", color: "text-amber-600", bgColor: "bg-amber-50" },
-            "6.0": { title: "動力設備與維護", color: "text-slate-600", bgColor: "bg-slate-50" }
+        // --- 系統訊息通知 ---
+        window.showMessage = (msg, type = 'info') => {
+            const box = document.getElementById('message-box');
+            const content = document.getElementById('message-content');
+            if(!box || !content) return;
+            content.innerText = msg;
+            box.className = `fixed top-10 left-1/2 -translate-x-1/2 z-[5000] px-8 py-4 rounded-3xl shadow-2xl font-black transition-all animate-fade ${type === 'error' ? 'bg-rose-600 text-white' : 'bg-slate-900 text-white'}`;
+            box.classList.remove('hidden');
+            setTimeout(() => box.classList.add('hidden'), 3000);
         };
 
-        const STAFF_ROLES = [
-            { id: "sow_lead", name: "母豬組長", icon: "heart", color: "text-rose-600", bgColor: "bg-rose-50" },
-            { id: "nursery_manager", name: "場長/保育組長", icon: "baby", color: "text-emerald-600", bgColor: "bg-emerald-50" },
-            { id: "porker_lead", name: "肉豬組長", icon: "droplets", color: "text-blue-600", bgColor: "bg-blue-50" },
-            { id: "support", name: "支援/機動組", icon: "shield", color: "text-violet-600", bgColor: "bg-violet-50" }
-        ];
+        // --- 日期與視圖切換 ---
+        window.handleDateChange = (e) => { 
+            window.selectedDate = e.target.value; 
+            window.loadDailyStatus(window.selectedDate); 
+        };
 
-        const WEEK_LOGIC = [
-            { id: 0, name: "配種週 (Breeding)", desc: "重心：公豬採精、母豬大配種、進入產房準備", class: "batch-breeding" },
-            { id: 1, name: "分娩週 (Farrowing)", desc: "重心：測孕、保育舍下高床、迎接大分娩", class: "batch-farrowing" },
-            { id: 2, name: "離乳週 (Weaning)", desc: "重心：保育舍準備、仔豬離乳、清洗產房", class: "batch-weaning" }
-        ];
+        window.goToday = () => { 
+            const t = new Date().toISOString().split('T')[0]; 
+            const dp = document.getElementById('date-picker');
+            if(dp) dp.value = t; 
+            window.selectedDate = t; 
+            window.loadDailyStatus(t); 
+        };
 
-        const DAY_NAMES = ["週日", "週一", "週二", "週三", "週四", "週五", "週六"];
-
-        // --- 網路監控 ---
-        window.addEventListener('online', updateOnlineStatus);
-        window.addEventListener('offline', updateOnlineStatus);
-        function updateOnlineStatus() {
-            const dot = document.getElementById('network-status-dot');
-            const text = document.getElementById('network-status-text');
-            if (navigator.onLine) {
-                dot.className = "w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]";
-                text.innerText = "連線同步中";
-            } else {
-                dot.className = "w-2 h-2 rounded-full bg-slate-400";
-                text.innerText = "離線作業中";
+        window.switchView = function(mode) {
+            window.viewMode = mode;
+            const logSec = document.getElementById('log-section');
+            const mainCont = document.getElementById('main-container');
+            if (logSec && mainCont) {
+                logSec.classList.toggle('hidden', mode !== 'logs');
+                mainCont.classList.toggle('hidden', mode === 'logs');
             }
-        }
+            ['btn-daily', 'btn-weekly', 'btn-master', 'btn-logs'].forEach(id => {
+                const btn = document.getElementById(id);
+                if(btn) btn.className = (id === `btn-${mode}`) ? 'px-6 py-2.5 rounded-xl text-xs font-black bg-indigo-600 text-white shadow-xl transition-all' : 'px-6 py-2.5 rounded-xl text-xs font-black text-slate-400 hover:bg-slate-100';
+            });
+            renderSystem();
+        };
 
-        // --- 核心邏輯 ---
-        window.calculateCurrentWeek = function(targetDateStr) {
-            const anchor = new Date(window.BATCH_ANCHOR_DATE);
-            const target = new Date(targetDateStr);
-            const diffTime = target.getTime() - anchor.getTime();
-            const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-            const dayInCycle = ((diffDays % 21) + 21) % 21;
-            return { weekNum: Math.floor(dayInCycle / 7), dayOfWeek: target.getDay() };
-        }
-
-        function normalizeRoles(roleData) {
-            if (Array.isArray(roleData)) return roleData;
-            if (typeof roleData === 'string' && roleData.trim() !== "") return roleData.split(',').map(r => r.trim());
-            return [];
-        }
-
-        async function loadAllData() {
-            const { doc, onSnapshot } = window.firebaseModules;
-            
-            // 優先從本地 IndexedDB 嘗試恢復緩存 (讓冷啟動更快)
-            const cachedConfig = await localDB.get("master_config");
-            if (cachedConfig) {
-                masterTasks = cachedConfig.tasks || [];
-                staffMapping = cachedConfig.staff || {};
-                sopLibraryData = cachedConfig.library || {};
-                renderSystem();
-                document.getElementById('local-status-dot').className = "w-2 h-2 rounded-full bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.5)]";
-            }
-
-            // 監聽雲端即時更新
-            onSnapshot(doc(window.db, 'artifacts', 'yl-command', 'public', 'data', 'master_tasks', 'config'), async (snap) => {
+        // --- 數據監聽 ---
+        async function startObservation() {
+            onSnapshot(doc(db, 'artifacts', 'yl-command', 'public', 'data', 'schedule', 'latest'), (snap) => {
                 if (snap.exists()) {
-                    const data = snap.data();
-                    masterTasks = data.tasks || [];
-                    staffMapping = data.staff || {}; 
-                    sopLibraryData = data.library || {};
-                    // 更新本地備份
-                    await localDB.save("master_config", data);
-                    document.getElementById('local-status-dot').className = "w-2 h-2 rounded-full bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.5)]";
+                    workSchedule = snap.data().tasks || [];
                     renderSystem();
-                } else if (!cachedConfig) {
-                    renderEmptyState();
                 }
             });
+
+            onSnapshot(collection(db, 'artifacts', 'yl-command', 'public', 'data', 'job_definitions'), (snap) => {
+                jobDefinitions = {};
+                snap.docs.forEach(d => jobDefinitions[d.id] = d.data());
+                renderSystem();
+            });
+
+            onSnapshot(collection(db, 'artifacts', 'yl-command', 'public', 'data', 'change_logs'), (snap) => {
+                changeLogs = snap.docs.map(d => d.data()).sort((a, b) => b.timestamp - a.timestamp);
+                renderLogs();
+            });
+
+            window.loadDailyStatus(window.selectedDate);
         }
 
         window.loadDailyStatus = function(dateStr) {
-            const { doc, onSnapshot } = window.firebaseModules;
-            if (window.unsubscribeDaily) window.unsubscribeDaily();
-            const docRef = doc(window.db, 'artifacts', 'yl-command', 'public', 'data', 'daily_status', dateStr);
-            window.unsubscribeDaily = onSnapshot(docRef, (snap) => {
+            onSnapshot(doc(db, 'artifacts', 'yl-command', 'public', 'data', 'daily_status', dateStr), (snap) => {
                 dailyProgress = snap.exists() ? snap.data() : {};
                 renderSystem();
             });
         }
 
-        window.toggleTask = async function(taskId) {
-            const { doc, setDoc } = window.firebaseModules;
-            dailyProgress[taskId] = !dailyProgress[taskId];
-            const docRef = doc(window.db, 'artifacts', 'yl-command', 'public', 'data', 'daily_status', window.selectedDate);
-            // 此處即使離線也會先存在 Firestore 本地快取，連線後自動同步
-            await setDoc(docRef, dailyProgress);
-        };
+        // --- 專業級 CSV 解析器 ---
+        function parseCSV(text) {
+            const result = [];
+            let row = [];
+            let cell = '';
+            let inQuotes = false;
+            for (let i = 0; i < text.length; i++) {
+                const char = text[i];
+                const nextChar = text[i + 1];
+                if (inQuotes) {
+                    if (char === '"' && nextChar === '"') { cell += '"'; i++; } 
+                    else if (char === '"') { inQuotes = false; } 
+                    else { cell += char; }
+                } else {
+                    if (char === '"') { inQuotes = true; } 
+                    else if (char === ',') { row.push(cell.trim()); cell = ''; } 
+                    else if (char === '\n' || char === '\r') {
+                        if (cell !== '' || row.length > 0) { row.push(cell.trim()); result.push(row); cell = ''; row = []; }
+                        if (char === '\r' && nextChar === '\n') i++;
+                    } else { cell += char; }
+                }
+            }
+            if (cell !== '' || row.length > 0) { row.push(cell.trim()); result.push(row); }
+            return result;
+        }
 
+        // --- 強制刷新同步邏輯 ---
         window.requestSync = async function() {
             const btn = document.getElementById('sync-btn');
-            btn.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> 正在跨分頁同步...`;
+            const originalHtml = btn.innerHTML;
+            btn.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> 強制重新整理...`;
             lucide.createIcons();
+
             try {
-                const fetchCSV = async (tab) => {
-                    const url = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet=${tab}`;
-                    const res = await fetch(url);
-                    const text = await res.text();
-                    return text.split('\n').map(r => r.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.replace(/^"|"$/g, '').trim()));
-                };
-                const [wbsRows, staffRows, libRows] = await Promise.all([fetchCSV(TAB_WBS), fetchCSV(TAB_STAFF), fetchCSV(TAB_LIBRARY)]);
-                const newTasks = wbsRows.slice(1).map((row, index) => ({
-                    id: `id_${row[3] || index}`, week: parseInt(row[0]), day: parseInt(row[1]),  
-                    role: (row[2] || "").split(',').map(r => r.trim()), 
-                    jobId: row[3], workName: row[4], jobTitle: row[5], moduleId: row[6]
-                })).filter(t => !isNaN(t.week) && t.workName);
-                const newStaffMap = {};
-                staffRows.slice(1).forEach(row => { if (row[0] && row[1]) newStaffMap[row[0]] = row[1]; });
-                const newLibrary = {};
-                libRows.slice(1).forEach(row => {
-                    const workKey = row[2]; const stepContent = row[4];
-                    if (workKey && stepContent) { if (!newLibrary[workKey]) newLibrary[workKey] = []; newLibrary[workKey].push(stepContent); }
-                });
+                const cacheBuster = `&t=${Date.now()}`;
+                
+                // 1. 同步排程
+                const masterUrl = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet=${TAB_MASTER}${cacheBuster}`;
+                const mRes = await fetch(masterUrl);
+                const mCsv = await mRes.text();
+                const mRows = parseCSV(mCsv);
+                const newSchedule = mRows.slice(1).map(row => ({
+                    week: parseInt(row[0]), day: parseInt(row[1]), id: row[2], title: row[3]
+                })).filter(t => t.id && !isNaN(t.week));
 
-                const syncData = { tasks: newTasks, staff: newStaffMap, library: newLibrary, lastSync: new Date().toISOString() };
-                const { doc, setDoc } = window.firebaseModules;
-                await setDoc(doc(window.db, 'artifacts', 'yl-command', 'public', 'data', 'master_tasks', 'config'), syncData);
-                await localDB.save("master_config", syncData); // 備份至 IndexedDB
-                alert("✅ 雲端與本地同步成功！");
-            } catch (error) { alert("❌ 同步失敗：請檢查網路或試算表設定。"); } finally {
-                btn.innerHTML = `<i data-lucide="refresh-cw" class="w-4 h-4"></i> 同步數據庫`;
-                lucide.createIcons();
-            }
-        };
+                await setDoc(doc(db, 'artifacts', 'yl-command', 'public', 'data', 'schedule', 'latest'), { tasks: newSchedule, lastSync: new Date().toISOString() });
 
-        // --- UI 控制 ---
-        window.switchView = function(mode) {
-            window.viewMode = mode;
-            ['btn-daily', 'btn-weekly', 'btn-all'].forEach(id => {
-                const btn = document.getElementById(id);
-                if (btn) btn.className = (id === `btn-${mode}`) ? 'px-6 py-3 rounded-2xl text-sm font-black bg-indigo-600 text-white shadow-xl transition-all' : 'px-6 py-3 rounded-2xl text-sm font-black text-slate-400 hover:text-slate-600 transition-all';
-            });
-            renderSystem();
-        };
-
-        window.handleDateChange = (e) => { window.selectedDate = e.target.value; window.loadDailyStatus(window.selectedDate); };
-        window.goToday = () => { const t = new Date().toISOString().split('T')[0]; document.getElementById('date-picker').value = t; window.selectedDate = t; window.loadDailyStatus(t); };
-
-        function renderSystem() {
-            const { weekNum, dayOfWeek } = window.calculateCurrentWeek(window.selectedDate);
-            const weekInfo = WEEK_LOGIC[weekNum];
-            if (document.getElementById('batch-card')) document.getElementById('batch-card').className = `glass-card p-10 rounded-[48px] shadow-sm border border-slate-100 animate-fade ${weekInfo.class}`;
-            if (document.getElementById('week-title')) document.getElementById('week-title').innerText = weekInfo.name;
-            if (document.getElementById('week-desc')) document.getElementById('week-desc').innerText = weekInfo.desc;
-            if (document.getElementById('batch-type-label')) document.getElementById('batch-type-label').innerText = weekInfo.name.split(' ')[0];
-
-            const sections = document.getElementById('staff-sections');
-            if (!sections) return;
-            sections.innerHTML = '';
-
-            if (window.viewMode === 'daily') renderDailyView(weekNum, dayOfWeek, sections);
-            else if (window.viewMode === 'weekly') renderWeeklyView(weekNum, sections);
-            else renderAllWBSView(sections);
-            lucide.createIcons();
-            updateOnlineStatus();
-        }
-
-        function renderDailyView(weekNum, dayOfWeek, container) {
-            let total = 0, done = 0;
-            STAFF_ROLES.forEach(role => {
-                const roleTasks = masterTasks.filter(t => normalizeRoles(t.role).includes(role.id) && t.week === weekNum && (t.day === dayOfWeek || (t.day === 7 && dayOfWeek === 0)));
-                if (roleTasks.length === 0) return;
-                const actualName = staffMapping[role.id] ? ` (${staffMapping[role.id]})` : "";
-                const card = document.createElement('div');
-                card.className = "glass-card p-8 rounded-[40px] border border-slate-100 shadow-sm animate-fade flex flex-col";
-                let html = `<div class="flex items-center gap-4 mb-8"><div class="p-3.5 rounded-2xl ${role.bgColor} ${role.color} shadow-inner"><i data-lucide="${role.icon}" class="w-7 h-7"></i></div><div><h3 class="text-xl font-black text-slate-800 leading-tight">${role.name}</h3><p class="text-[11px] font-bold text-slate-400 uppercase tracking-widest">${actualName}</p></div></div><div class="space-y-4">`;
-                roleTasks.forEach(task => {
-                    total++; const isDone = dailyProgress[task.id] || false; if (isDone) done++;
-                    const modInfo = MODULE_MAP[task.moduleId] || { title: "", color: "text-slate-400" };
-                    const roles = normalizeRoles(task.role);
-                    let staffNames = roles.map(rid => staffMapping[rid] || rid).join(' & ');
-                    html += `
-                        <div class="flex flex-col gap-1 p-6 rounded-[32px] transition-all ${isDone ? 'bg-emerald-50 border-emerald-100 shadow-inner' : 'bg-slate-50 border-transparent hover:bg-white hover:shadow-xl'} border relative group">
-                            <div class="flex justify-between items-start mb-2">
-                                <div class="flex flex-col gap-1">
-                                    <span class="text-[9px] font-black uppercase tracking-tighter ${modInfo.color}">${task.moduleId ? `[MOD ${task.moduleId}] ${modInfo.title}` : '一般任務'}</span>
-                                    <span class="text-[8px] font-black text-indigo-500 bg-indigo-50 px-1.5 py-0.5 rounded-md w-fit flex items-center gap-1 uppercase">負責人: ${staffNames}</span>
-                                </div>
-                                <button onclick="window.toggleTask('${task.id}')" class="w-8 h-8 rounded-full border-2 flex items-center justify-center transition-all ${isDone ? 'bg-emerald-500 border-emerald-500 text-white' : 'border-slate-300 group-hover:border-indigo-500'}">${isDone ? '<i data-lucide="check" class="w-4 h-4"></i>' : ''}</button>
-                            </div>
-                            <div class="cursor-pointer" onclick="window.openSOPDetail('${task.moduleId}', '${task.workName}')">
-                                <h4 class="font-black text-slate-900 text-base mb-1 tracking-tight">${task.workName}</h4>
-                                <div class="flex items-center gap-2"><p class="text-sm font-bold text-slate-500 leading-snug flex-1">${task.jobTitle}</p><i data-lucide="arrow-right-circle" class="w-4 h-4 text-slate-200 group-hover:text-indigo-500 transition-colors"></i></div>
-                            </div>
-                        </div>`;
-                });
-                card.innerHTML = html + `</div>`;
-                container.appendChild(card);
-            });
-            if (document.getElementById('task-ratio')) document.getElementById('task-ratio').innerText = `${done}/${total}`;
-            if (document.getElementById('overall-progress')) document.getElementById('overall-progress').style.width = `${total > 0 ? (done/total)*100 : 0}%`;
-        }
-
-        function renderWeeklyView(weekNum, container) {
-            container.className = "grid grid-cols-1 gap-8"; 
-            for (let d = 1; d <= 7; d++) {
-                const tasks = masterTasks.filter(t => t.week === weekNum && t.day === d);
-                if (tasks.length === 0) continue;
-                const dayBlock = document.createElement('div');
-                dayBlock.className = "glass-card p-10 rounded-[48px] border border-slate-100 shadow-sm animate-fade";
-                let dayHtml = `<div class="flex items-center gap-5 mb-8"><div class="w-16 h-16 rounded-[24px] bg-slate-900 text-white flex flex-col items-center justify-center shadow-lg"><span class="text-xs font-black uppercase tracking-widest">${DAY_NAMES[d % 7]}</span></div><h3 class="text-2xl font-black text-slate-800 tracking-tighter">當日流程</h3></div><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">`;
-                tasks.forEach(task => {
-                    let staffLabels = normalizeRoles(task.role).map(rid => {
-                        const r = STAFF_ROLES.find(sr => sr.id === rid);
-                        return `<span class="text-[9px] font-black px-2 py-1 rounded-lg ${r?.bgColor || 'bg-slate-100'} ${r?.color || 'text-slate-400'} uppercase mr-1 inline-block mb-1">${staffMapping[rid] || r?.name || rid}</span>`;
-                    }).join('');
-                    dayHtml += `<div class="p-6 rounded-[32px] bg-white border border-slate-100 shadow-sm hover:shadow-md transition-all cursor-pointer" onclick="window.openSOPDetail('${task.moduleId}', '${task.workName}')"><div class="flex flex-wrap gap-1.5 mb-4">${staffLabels}</div><p class="text-[10px] font-black text-indigo-500 mb-1 tracking-widest uppercase">ID ${task.jobId}</p><h4 class="font-black text-slate-800 text-base mb-1">${task.workName}</h4><p class="text-xs font-bold text-slate-400 leading-relaxed">${task.jobTitle}</p></div>`;
-                });
-                dayBlock.innerHTML = dayHtml + `</div>`;
-                container.appendChild(dayBlock);
-            }
-        }
-
-        function renderAllWBSView(container) {
-            container.className = "grid grid-cols-1 gap-16";
-            WEEK_LOGIC.forEach(weekInfo => {
-                const sec = document.createElement('div');
-                let html = `<div class="flex items-center gap-6 border-b-4 ${weekInfo.class.replace('border-top', 'border-bottom')} pb-6 mb-10"><h2 class="text-4xl font-black text-slate-900">${weekInfo.name}</h2></div><div class="space-y-12">`;
-                for (let d = 1; d <= 7; d++) {
-                    const tasks = masterTasks.filter(t => t.week === weekInfo.id && t.day === d);
-                    if (tasks.length === 0) continue;
-                    html += `<div class="flex flex-col lg:flex-row gap-10"><div class="lg:w-32 font-black text-2xl text-slate-200 uppercase tracking-widest">${DAY_NAMES[d % 7]}</div><div class="flex-1 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">`;
-                    tasks.forEach(t => {
-                        let names = normalizeRoles(t.role).map(rid => staffMapping[rid] || rid).join(', ');
-                        html += `<div class="p-6 rounded-[32px] bg-white border border-slate-100 shadow-sm cursor-pointer hover:shadow-md transition-all" onclick="window.openSOPDetail('${t.moduleId}', '${t.workName}')"><span class="text-[8px] font-black text-indigo-500 block mb-2 uppercase">${names}</span><h4 class="font-black text-slate-800 text-sm mb-1">${t.workName}</h4><p class="text-[10px] font-bold text-slate-400">${t.jobTitle}</p></div>`;
-                    });
-                    html += `</div></div>`;
+                // 2. 同步內容定義
+                const defsUrl = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet=${TAB_DEFS}${cacheBuster}`;
+                const dRes = await fetch(defsUrl);
+                const dCsv = await dRes.text();
+                const dRows = parseCSV(dCsv);
+                
+                for(let row of dRows.slice(1)) {
+                    const id = row[0];
+                    if(!id) continue;
+                    await setDoc(doc(db, 'artifacts', 'yl-command', 'public', 'data', 'job_definitions', id), {
+                        staff: row[1] || "未指定",
+                        content: row[2] || "無細節步驟"
+                    }, { merge: true });
                 }
-                sec.innerHTML = html + `</div>`;
-                container.appendChild(sec);
-            });
+
+                window.showMessage("✅ 雲端資料與 Excel 已同步！");
+            } catch (e) { 
+                console.error(e);
+                window.showMessage("❌ 同步失敗，請確認網路或分頁名稱。", "error"); 
+            }
+            btn.innerHTML = originalHtml;
+            lucide.createIcons();
+        };
+
+        // --- UI 元件 ---
+        function createWorkCard(task, isSmall = false) {
+            const isDone = dailyProgress[task.id] || false;
+            const def = jobDefinitions[task.id] || { staff: "讀取中...", content: "" };
+            const div = document.createElement('div');
+            div.className = `p-6 rounded-[32px] border transition-all cursor-pointer flex items-center justify-between group shadow-sm ${isDone ? 'bg-emerald-50 border-emerald-100 opacity-60' : 'bg-white border-slate-100 hover:shadow-xl hover:-translate-y-1'}`;
+            div.onclick = () => window.openJobPage(task.id, task.title);
+            div.innerHTML = `
+                <div class="flex items-center gap-4">
+                    <div class="w-10 h-10 rounded-2xl flex items-center justify-center font-black text-xs ${isDone ? 'bg-emerald-500 text-white' : 'bg-slate-900 text-white'}">${task.id}</div>
+                    <div>
+                        <h3 class="${isSmall ? 'text-sm' : 'text-lg'} font-black text-slate-900 leading-none mb-1">${task.title}</h3>
+                        <p class="text-[9px] font-bold text-slate-400 uppercase tracking-widest">${def.staff}</p>
+                    </div>
+                </div>
+                <div class="w-8 h-8 rounded-full border flex items-center justify-center ${isDone ? 'bg-emerald-500 border-transparent text-white' : 'border-slate-100 text-slate-200 group-hover:text-indigo-500'}">
+                    ${isDone ? '<i data-lucide="check" class="w-4 h-4"></i>' : '<i data-lucide="chevron-right" class="w-4 h-4"></i>'}
+                </div>`;
+            return div;
         }
 
-        window.openSOPDetail = function(moduleId, workName) {
-            const steps = sopLibraryData[workName];
-            const moduleName = MODULE_MAP[moduleId]?.title || "標準作業規範";
-            document.getElementById('sop-modal-title').innerText = workName;
-            document.getElementById('sop-modal-tag').innerText = `MOD ${moduleId} | ${moduleName}`;
-            const stepsContainer = document.getElementById('sop-modal-steps');
-            if (steps && steps.length > 0) {
-                stepsContainer.innerHTML = steps.map((s, i) => `<div class="flex gap-6 p-6 bg-slate-50 rounded-[28px] mb-4 hover:bg-white transition-all group shadow-sm"><div class="w-10 h-10 flex-shrink-0 bg-white rounded-xl flex items-center justify-center font-black text-sm text-indigo-600 shadow-sm group-hover:bg-indigo-600 group-hover:text-white transition-colors">${i+1}</div><div class="flex-1 pt-1"><p class="text-base font-bold text-slate-700 leading-relaxed">${s}</p></div></div>`).join('');
-            } else {
-                stepsContainer.innerHTML = `<div class="py-20 text-center text-slate-300 font-bold"><p>尚未定義詳細步驟。</p></div>`;
-            }
-            document.getElementById('sop-modal-overlay').classList.remove('hidden');
+        window.openJobPage = async function(jobId, jobTitle) {
+            window.currentJobId = jobId;
+            window.currentJobTitle = jobTitle;
+            const def = jobDefinitions[jobId] || { staff: "", content: "" };
+            document.getElementById('modal-id').innerText = jobId;
+            document.getElementById('modal-title').innerText = jobTitle;
+            window.toggleEditMode(false, def);
+            const isDone = dailyProgress[jobId] || false;
+            const btn = document.getElementById('modal-complete-btn');
+            btn.className = `w-full py-6 rounded-[28px] font-black text-xl shadow-2xl transition-all ${isDone ? 'bg-slate-100 text-slate-400' : 'bg-emerald-600 text-white'}`;
+            btn.innerText = isDone ? "取消完成狀態" : "確認已執行完畢";
+            btn.onclick = async () => {
+                dailyProgress[jobId] = !isDone;
+                await setDoc(doc(db, 'artifacts', 'yl-command', 'public', 'data', 'daily_status', window.selectedDate), dailyProgress);
+                window.closeModal();
+            };
+            document.getElementById('work-modal').classList.remove('hidden');
             document.body.style.overflow = 'hidden';
             lucide.createIcons();
         };
 
-        window.closeSOPModal = () => { document.getElementById('sop-modal-overlay').classList.add('hidden'); document.body.style.overflow = ''; };
-        window.checkPasscode = () => { if (document.getElementById('passcode-input').value === MASTER_PASSCODE) { sessionStorage.setItem('yl_auth', 'true'); document.getElementById('auth-overlay').classList.add('hidden'); startSystem(); } };
-        function startSystem() { onAuthStateChanged(auth, (u) => { if (u) { loadAllData(); window.loadDailyStatus(window.selectedDate); } else { signInAnonymously(auth); } }); }
-        
-        window.onload = () => {
-            if (sessionStorage.getItem('yl_auth') === 'true') { document.getElementById('auth-overlay').classList.add('hidden'); startSystem(); }
-            document.getElementById('date-picker').value = window.selectedDate;
-            updateOnlineStatus();
+        // --- 修正：直接顯示原始內容，不給數字編號 ---
+        window.toggleEditMode = function(isEdit, def = null) {
+            window.isEditMode = isEdit;
+            const viewArea = document.getElementById('modal-view-area');
+            const editArea = document.getElementById('modal-edit-area');
+            const editBtn = document.getElementById('modal-edit-toggle-btn');
+            if(!def) def = jobDefinitions[window.currentJobId] || { staff: "", content: "" };
+            
+            if (isEdit) {
+                viewArea.classList.add('hidden'); editArea.classList.remove('hidden'); editBtn.classList.add('hidden');
+                document.getElementById('edit-staff').value = def.staff;
+                document.getElementById('edit-content').value = def.content;
+            } else {
+                viewArea.classList.remove('hidden'); editArea.classList.add('hidden'); editBtn.classList.remove('hidden');
+                document.getElementById('modal-staff-display').innerText = def.staff || "尚未指派人員";
+                
+                // 直接讀取原始內容並顯示 (保留換行)
+                const rawContent = def.content || "";
+                document.getElementById('modal-content-display').innerHTML = rawContent 
+                    ? `<div class="p-6 bg-slate-50 rounded-[32px] whitespace-pre-wrap text-lg font-bold text-slate-700 leading-relaxed">${rawContent}</div>`
+                    : `<div class="py-12 text-center text-slate-300 italic">點擊編輯按鈕新增內容。</div>`;
+            }
+            lucide.createIcons();
         };
+
+        window.saveJobEdit = async function() {
+            const newStaff = document.getElementById('edit-staff').value;
+            const newContent = document.getElementById('edit-content').value;
+            const oldDef = jobDefinitions[window.currentJobId] || { staff: "(空)", content: "(空)" };
+            await setDoc(doc(db, 'artifacts', 'yl-command', 'public', 'data', 'job_definitions', window.currentJobId), {
+                staff: newStaff, content: newContent, updatedAt: serverTimestamp()
+            });
+            if (newStaff !== oldDef.staff || newContent !== oldDef.content) {
+                await addDoc(collection(db, 'artifacts', 'yl-command', 'public', 'data', 'change_logs'), {
+                    workId: window.currentJobId, workTitle: window.currentJobTitle, oldStaff: oldDef.staff, newStaff: newStaff,
+                    changeDate: new Date().toLocaleDateString('zh-TW'), timestamp: Date.now()
+                });
+            }
+            window.showMessage("✅ 內容更新成功！");
+            window.toggleEditMode(false, { staff: newStaff, content: newContent });
+        };
+
+        function renderSystem() {
+            const container = document.getElementById('main-container');
+            if (!container) return;
+            const { week, day } = window.calculateCurrentWeek(window.selectedDate);
+            document.getElementById('week-display').innerText = WEEK_NAMES[week] || "週期載入中";
+            container.innerHTML = '';
+            if (window.viewMode === 'daily') {
+                const tasks = workSchedule.filter(t => t.week === week && t.day === day);
+                container.className = "grid grid-cols-1 md:grid-cols-2 gap-6";
+                if (tasks.length === 0) container.innerHTML = `<div class="col-span-full py-20 text-center text-slate-300 font-black italic">今日無任務</div>`;
+                tasks.forEach(t => container.appendChild(createWorkCard(t)));
+            } else if (window.viewMode === 'weekly') {
+                container.className = "space-y-10";
+                for(let d=1; d<=7; d++) {
+                    const tasks = workSchedule.filter(t => t.week === week && t.day === d);
+                    if (tasks.length === 0) continue;
+                    const daySec = document.createElement('div');
+                    daySec.innerHTML = `<div class="flex items-center gap-4 mb-4"><div class="px-4 py-1 rounded-full bg-slate-900 text-white text-xs font-black uppercase tracking-widest">${DAY_LABELS[d]}</div><div class="flex-1 h-[1px] bg-slate-100"></div></div><div class="grid grid-cols-1 md:grid-cols-3 gap-4"></div>`;
+                    tasks.forEach(t => daySec.querySelector('div:last-child').appendChild(createWorkCard(t, true)));
+                    container.appendChild(daySec);
+                }
+            } else if (window.viewMode === 'master') {
+                container.className = "space-y-16";
+                WEEK_NAMES.forEach((name, wIdx) => {
+                    const sec = document.createElement('div');
+                    sec.innerHTML = `<div class="flex items-center gap-6 mb-8 border-b-4 border-slate-900 pb-4"><h2 class="text-2xl font-black text-slate-900 uppercase">${name} (W${wIdx})</h2></div><div class="space-y-8"></div>`;
+                    for(let d=1; d<=7; d++) {
+                        const tasks = workSchedule.filter(t => t.week === wIdx && t.day === d);
+                        if (tasks.length === 0) continue;
+                        const row = document.createElement('div');
+                        row.className = "flex flex-col md:flex-row gap-6";
+                        row.innerHTML = `<div class="md:w-20 font-black text-slate-200 text-xl">${DAY_LABELS[d]}</div><div class="flex-1 grid grid-cols-1 md:grid-cols-3 gap-4"></div>`;
+                        tasks.forEach(t => row.querySelector('div:last-child').appendChild(createWorkCard(t, true)));
+                        sec.querySelector('div:last-child').appendChild(row);
+                    }
+                    container.appendChild(sec);
+                });
+            }
+            lucide.createIcons();
+        }
+
+        function renderLogs() {
+            const container = document.getElementById('log-list');
+            if (!container) return;
+            container.innerHTML = changeLogs.length === 0 ? `<div class="py-20 text-center text-slate-300 font-bold italic">尚無異動紀錄</div>` : 
+                changeLogs.map(log => `
+                <div class="p-6 bg-white border border-slate-100 rounded-[32px] shadow-sm mb-4 animate-fade">
+                    <div class="flex justify-between items-start mb-4"><span class="text-[10px] font-black bg-indigo-50 text-indigo-600 px-3 py-1 rounded-full uppercase">異動：${log.changeDate}</span><span class="text-xs font-black text-slate-300 tracking-widest">ID ${log.workId}</span></div>
+                    <h4 class="text-xl font-black text-slate-900 mb-4">${log.workTitle}</h4>
+                    <div class="grid grid-cols-2 gap-4 text-xs font-bold bg-slate-50 p-4 rounded-2xl shadow-inner">
+                        <div><p class="text-slate-400 mb-1 tracking-widest">原負責人</p>${log.oldStaff}</div>
+                        <div class="border-l border-slate-200 pl-4"><p class="text-indigo-600 mb-1 tracking-widest">新負責人</p>${log.newStaff}</div>
+                    </div>
+                </div>`).join('');
+        }
+
+        window.closeModal = () => { document.getElementById('work-modal').classList.add('hidden'); document.body.style.overflow = ''; };
+        window.checkPasscode = () => {
+            if (document.getElementById('passcode-input').value === MASTER_PASSCODE) {
+                sessionStorage.setItem('yl_auth', 'true');
+                document.getElementById('auth-overlay').classList.add('hidden');
+                startObservation();
+            } else { window.showMessage("通行碼錯誤", "error"); }
+        };
+
+        onAuthStateChanged(auth, (user) => {
+            if (user && sessionStorage.getItem('yl_auth') === 'true') {
+                document.getElementById('auth-overlay').classList.add('hidden');
+                startObservation();
+            } else if (!user) {
+                signInAnonymously(auth);
+            }
+        });
+
+        window.onload = () => { 
+            const dp = document.getElementById('date-picker');
+            if(dp) dp.value = window.selectedDate; 
+        };
+
+        const WEEK_NAMES = ["配種週", "分娩週", "離乳週"];
+        const DAY_LABELS = ["", "週一", "週二", "週三", "週四", "週五", "週六", "週日"];
     </script>
 
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700;900&display=swap');
         body { font-family: 'Noto Sans TC', sans-serif; background-color: #f8fafc; color: #1e293b; -webkit-tap-highlight-color: transparent; }
-        .batch-breeding { border-top: 14px solid #3b82f6; } 
-        .batch-farrowing { border-top: 14px solid #10b981; } 
-        .batch-weaning { border-top: 14px solid #f59e0b; }   
-        .batch-breeding.border-bottom { border-bottom: 10px solid #3b82f6; border-top: none; }
-        .batch-farrowing.border-bottom { border-bottom: 10px solid #10b981; border-top: none; }
-        .batch-weaning.border-bottom { border-bottom: 10px solid #f59e0b; border-top: none; }
         .glass-card { background: rgba(255, 255, 255, 0.98); backdrop-filter: blur(10px); }
         .animate-fade { animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
-<body class="min-h-screen pb-24">
+<body class="min-h-screen pb-24 text-slate-900">
+
+    <div id="message-box" class="hidden">
+        <span id="message-content"></span>
+    </div>
 
     <!-- 驗證介面 (略) -->
     <div id="auth-overlay" class="fixed inset-0 z-[2000] bg-slate-900 flex items-center justify-center p-6">
-        <div class="max-w-md w-full bg-white rounded-[48px] p-12 shadow-2xl text-center">
-            <h2 class="text-3xl font-black text-slate-900 mb-8 tracking-tighter">永隆智慧中心</h2>
-            <input type="password" id="passcode-input" placeholder="PASSCODE" class="w-full px-6 py-5 bg-slate-50 rounded-2xl text-center text-3xl font-black mb-6 outline-none border-2 border-transparent focus:border-indigo-500 focus:bg-white transition-all tracking-[0.3em]">
-            <button onclick="window.checkPasscode()" class="w-full py-5 bg-indigo-600 text-white rounded-2xl font-black text-lg active:scale-95 transition-all shadow-xl shadow-indigo-100">啟動離線 APP</button>
+        <div class="max-w-md w-full bg-white rounded-[56px] p-12 shadow-2xl text-center">
+            <h2 class="text-3xl font-black mb-8 tracking-tighter leading-tight text-slate-900">永隆智慧指揮中心</h2>
+            <input type="password" id="passcode-input" placeholder="PASSCODE" class="w-full px-6 py-6 bg-slate-50 rounded-3xl text-center text-4xl font-black mb-8 outline-none border-2 border-transparent focus:border-indigo-500 tracking-[0.4em]">
+            <button onclick="window.checkPasscode()" class="w-full py-6 bg-indigo-600 text-white rounded-3xl font-black text-xl active:scale-95 shadow-xl">進入管理大腦</button>
         </div>
     </div>
 
-    <header class="sticky top-0 z-50 glass-card border-b border-slate-200/60 px-6 py-6">
+    <header class="sticky top-0 z-50 glass-card border-b border-slate-200/60 px-6 py-5">
         <div class="max-w-[1600px] mx-auto flex flex-col xl:flex-row items-center justify-between gap-6">
             <div class="flex items-center gap-6">
-                <div class="bg-slate-900 p-4 rounded-[24px] shadow-2xl"><i data-lucide="zap" class="w-8 h-8 text-white"></i></div>
+                <div class="bg-slate-900 p-3 rounded-2xl shadow-xl text-white"><i data-lucide="layout"></i></div>
                 <div>
-                    <h1 class="text-2xl font-black text-slate-900 tracking-tighter mb-1 leading-none">永隆指揮中心</h1>
+                    <h1 class="text-xl font-black tracking-tighter leading-none mb-1 text-slate-900">永隆管理大腦</h1>
                     <div class="flex items-center gap-3">
-                        <div class="flex items-center gap-2 bg-slate-100 px-3 py-1 rounded-full border border-slate-200">
-                            <span id="network-status-dot" class="w-2 h-2 rounded-full bg-emerald-500"></span>
-                            <span id="network-status-text" class="text-[10px] font-black text-slate-500 uppercase tracking-widest">連線同步中</span>
-                        </div>
-                        <div class="flex items-center gap-2 bg-indigo-50 px-3 py-1 rounded-full border border-indigo-100">
-                            <span id="local-status-dot" class="w-2 h-2 rounded-full bg-slate-300"></span>
-                            <span class="text-[10px] font-black text-indigo-500 uppercase tracking-widest">本地持久化</span>
-                        </div>
-                        <input type="date" id="date-picker" onchange="window.handleDateChange(event)" class="text-[11px] font-black text-indigo-600 bg-transparent border-none outline-none cursor-pointer">
+                        <span id="week-display" class="text-[10px] font-black px-3 py-1 rounded-full bg-indigo-100 text-indigo-700 uppercase tracking-widest shadow-sm">載入中</span>
+                        <input type="date" id="date-picker" onchange="window.handleDateChange(event)" class="text-[11px] font-black text-slate-400 bg-transparent border-none outline-none cursor-pointer hover:text-indigo-600 transition-colors">
                     </div>
                 </div>
             </div>
             
-            <div class="flex items-center gap-1.5 bg-slate-100 p-2 rounded-3xl shadow-inner">
-                <button id="btn-daily" onclick="window.switchView('daily')" class="px-6 py-3 rounded-2xl text-sm font-black bg-indigo-600 text-white shadow-xl transition-all">今日看板</button>
-                <button id="btn-weekly" onclick="window.switchView('weekly')" class="px-6 py-3 rounded-2xl text-sm font-black text-slate-400 hover:text-slate-600 transition-all">週看板</button>
-                <button id="btn-all" onclick="window.switchView('all')" class="px-6 py-3 rounded-2xl text-sm font-black text-slate-400 hover:text-slate-600 transition-all">全案總覽</button>
+            <div class="flex items-center gap-1.5 bg-slate-100 p-1.5 rounded-2xl shadow-inner">
+                <button id="btn-daily" onclick="window.switchView('daily')" class="px-6 py-2.5 rounded-xl text-xs font-black bg-indigo-600 text-white shadow-xl">今日任務</button>
+                <button id="btn-weekly" onclick="window.switchView('weekly')" class="px-6 py-2.5 rounded-xl text-xs font-black text-slate-400">週看板</button>
+                <button id="btn-master" onclick="window.switchView('master')" class="px-6 py-2.5 rounded-xl text-xs font-black text-slate-400">全案總覽</button>
+                <button id="btn-logs" onclick="window.switchView('logs')" class="px-6 py-2.5 rounded-xl text-xs font-black text-slate-400">更動日誌</button>
             </div>
 
             <div class="flex items-center gap-4">
-                <button onclick="window.goToday()" class="text-xs bg-white border border-slate-200 px-6 py-3 rounded-2xl hover:bg-indigo-600 hover:text-white transition-all shadow-sm font-black tracking-widest">回今日</button>
-                <button id="sync-btn" onclick="window.requestSync()" class="flex items-center gap-2 px-6 py-3 rounded-2xl bg-slate-900 text-white font-black text-sm shadow-xl transition-all"><i data-lucide="refresh-cw" class="w-4 h-4"></i>同步數據庫</button>
+                <button onclick="window.goToday()" class="px-5 py-2.5 rounded-xl bg-white border border-slate-200 text-[10px] font-black text-slate-600 hover:bg-slate-50 active:scale-95 transition-all shadow-sm">回今日</button>
+                <button id="sync-btn" onclick="window.requestSync()" class="px-5 py-2.5 rounded-xl bg-slate-900 text-white font-black text-[10px] shadow-xl flex items-center gap-2 active:scale-95 transition-all"><i data-lucide="refresh-cw" class="w-3 h-3"></i>同步數據庫</button>
             </div>
         </div>
     </header>
 
     <main class="max-w-[1600px] mx-auto px-6 py-10">
-        <section class="grid grid-cols-1 md:grid-cols-2 gap-8 mb-12">
-            <div id="batch-card" class="glass-card p-12 rounded-[56px] shadow-sm border border-slate-100 animate-fade">
-                <p class="text-[11px] font-black text-slate-400 uppercase mb-4 tracking-widest">週期狀態</p>
-                <h2 id="week-title" class="text-5xl font-black text-slate-900 mb-2 tracking-tighter">-- 週</h2>
-                <p id="week-desc" class="text-base text-slate-500 font-medium leading-relaxed">正在計算中...</p>
-            </div>
-            <div class="glass-card p-12 rounded-[56px] shadow-sm border border-slate-100 animate-fade">
-                <p class="text-[11px] font-black text-slate-400 uppercase mb-4 tracking-widest">任務進度統計</p>
-                <div class="flex items-end gap-5">
-                    <h2 id="task-ratio" class="text-6xl font-black text-slate-900 tabular-nums">0/0</h2>
-                    <p class="text-lg font-black text-slate-400 mb-1 uppercase">COMPLETED</p>
-                </div>
-                <div class="w-full h-3 bg-slate-100 rounded-full mt-8 overflow-hidden shadow-inner"><div id="overall-progress" class="h-full bg-indigo-600 transition-all duration-1000 ease-out" style="width: 0%"></div></div>
-            </div>
-        </section>
-        <div id="staff-sections" class="grid grid-cols-1 lg:grid-cols-2 gap-12"></div>
+        <div id="main-container"></div>
+        <div id="log-section" class="hidden animate-fade max-w-2xl mx-auto">
+            <h2 class="text-2xl font-black mb-8 flex items-center gap-3 text-slate-900"><i data-lucide="history"></i> 生產優化異動日誌</h2>
+            <div id="log-list"></div>
+        </div>
     </main>
 
-    <div id="sop-modal-overlay" class="fixed inset-0 z-[3000] bg-slate-900/80 backdrop-blur-md flex items-center justify-center p-4 md:p-8 hidden">
-        <div class="bg-white w-full max-w-3xl rounded-[56px] shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-fade">
-            <div class="p-10 border-b border-slate-100 flex justify-between items-start bg-slate-50/50">
+    <!-- 工作內容 Modal (單頁手冊) -->
+    <div id="work-modal" class="fixed inset-0 z-[3000] bg-slate-900/90 backdrop-blur-xl flex items-center justify-center p-4 md:p-10 hidden">
+        <div class="bg-white w-full max-w-3xl rounded-[60px] shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-fade">
+            <div class="p-10 border-b border-slate-50 flex justify-between items-start bg-white sticky top-0 z-10 shadow-sm">
                 <div>
-                    <span id="sop-modal-tag" class="text-[10px] font-black px-3 py-1 rounded-full bg-indigo-100 text-indigo-700 uppercase mb-4 block w-fit tracking-widest"></span>
-                    <h3 id="sop-modal-title" class="text-4xl font-black text-slate-900 leading-tight"></h3>
+                    <div class="flex items-center gap-3 mb-4">
+                        <span id="modal-id" class="px-3 py-1 rounded-lg bg-slate-900 text-white font-black text-xs"></span>
+                        <button id="modal-edit-toggle-btn" onclick="window.toggleEditMode(true)" class="text-[10px] font-black text-indigo-600 bg-indigo-50 px-3 py-1 rounded-lg flex items-center gap-2 hover:bg-indigo-600 hover:text-white transition-all shadow-sm"><i data-lucide="edit-3" class="w-3 h-3"></i> 編輯內容</button>
+                    </div>
+                    <h3 id="modal-title" class="text-4xl font-black text-slate-900 tracking-tighter"></h3>
                 </div>
-                <button onclick="window.closeSOPModal()" class="p-4 text-slate-300 hover:text-rose-500 transition-all"><i data-lucide="x" class="w-8 h-8"></i></button>
+                <button onclick="window.closeModal()" class="p-4 text-slate-300 hover:text-rose-500 transition-all"><i data-lucide="x" class="w-10 h-10"></i></button>
             </div>
-            <div id="sop-modal-steps" class="p-10 overflow-y-auto space-y-2"></div>
-            <div class="p-8 bg-white border-t border-slate-50 flex justify-center">
-                <button onclick="window.closeSOPModal()" class="px-16 py-5 bg-slate-900 text-white rounded-[24px] font-black text-lg active:scale-95 transition-all shadow-2xl">了解，我會按步驟執行</button>
+            
+            <div id="modal-view-area" class="px-10 py-6 overflow-y-auto">
+                <div class="mb-8">
+                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-2">負責人員</p>
+                    <p id="modal-staff-display" class="text-xl font-black text-slate-900"></p>
+                </div>
+                <div>
+                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">操作步驟</p>
+                    <div id="modal-content-display"></div>
+                </div>
+            </div>
+
+            <div id="modal-edit-area" class="hidden px-10 py-6 overflow-y-auto space-y-6">
+                <div>
+                    <label class="block text-[10px] font-black text-slate-400 uppercase mb-2">負責人員</label>
+                    <input type="text" id="edit-staff" class="w-full p-4 bg-slate-50 rounded-2xl font-bold outline-none border-2 border-transparent focus:border-indigo-500">
+                </div>
+                <div>
+                    <label class="block text-[10px] font-black text-slate-400 uppercase mb-2">標準作業細節 (Content)</label>
+                    <textarea id="edit-content" rows="12" class="w-full p-6 bg-slate-50 rounded-[32px] font-bold outline-none border-2 border-transparent focus:border-indigo-500 leading-relaxed"></textarea>
+                </div>
+                <div class="flex gap-4">
+                    <button onclick="window.toggleEditMode(false)" class="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black">取消</button>
+                    <button onclick="window.saveJobEdit()" class="flex-[2] py-4 bg-indigo-600 text-white rounded-2xl font-black shadow-xl">儲存並記錄更動</button>
+                </div>
+            </div>
+
+            <div class="p-8 bg-white border-t border-slate-50">
+                <button id="modal-complete-btn" class="w-full py-6 rounded-[32px] font-black text-2xl active:scale-95 transition-all shadow-2xl"></button>
             </div>
         </div>
     </div>
+
 </body>
 </html>
